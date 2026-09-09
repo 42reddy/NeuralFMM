@@ -97,9 +97,42 @@ class PaiNN(nn.Module):
 
     def forward(self, positions, species, cell):
         edge_index, _, vectors = periodic_neighbor_list(positions, cell, self.r_cut)
+        return self._run(species, edge_index, vectors)
 
+    def forward_batched(self, positions_list, species, cell_list):
+        """Same computation as `forward`, but over N structures concatenated
+        into one block-diagonal graph instead of looped one at a time.
+
+        positions_list / cell_list: length-N per-structure tensors (each
+        structure has its own periodic cell, so its neighbor list has to be
+        built separately -- this loop only builds index tensors, it does no
+        model math). species: (sum(n_i),) already concatenated in the same
+        structure order as positions_list.
+
+        Every edge stays within the structure it came from (src/dst are
+        offset per structure, never cross-linked), so the shared
+        message/update stack below -- which only does index_add_ scatter
+        over `edge_index`/embedding lookups, no structure-count assumption
+        -- gives bit-identical per-atom features to calling `forward` once
+        per structure, just in a single batched pass instead of N sequential
+        ones.
+        """
+        edge_chunks, vector_chunks = [], []
+        offset = 0
+        for positions, cell in zip(positions_list, cell_list):
+            edge_index, _, vectors = periodic_neighbor_list(positions, cell, self.r_cut)
+            edge_chunks.append(edge_index + offset)
+            vector_chunks.append(vectors)
+            offset += positions.shape[0]
+
+        device = species.device
+        edge_index = torch.cat(edge_chunks, dim=1) if edge_chunks else torch.zeros(2, 0, dtype=torch.long, device=device)
+        vectors = torch.cat(vector_chunks, dim=0) if vector_chunks else torch.zeros(0, 3, device=device)
+        return self._run(species, edge_index, vectors)
+
+    def _run(self, species, edge_index, vectors):
         s = self.embedding(species)
-        v = torch.zeros(species.shape[0], 3, self.hidden_dim, device=positions.device, dtype=positions.dtype)
+        v = torch.zeros(species.shape[0], 3, self.hidden_dim, device=species.device, dtype=s.dtype)
 
         for msg, upd in zip(self.messages, self.updates):
             s, v = msg(s, v, edge_index, vectors)

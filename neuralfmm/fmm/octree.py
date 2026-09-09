@@ -181,3 +181,80 @@ def build_octree(positions, cell, depth):
 
     tree.levels.reverse()  # index 0 = root, index depth = leaf
     return tree
+
+
+def merge_trees(trees):
+    """Merge same-depth, per-structure Octrees into one block-diagonal
+    Octree spanning a whole training batch.
+
+    NeuralFMMBlock (fmm/blocks.py) only ever touches a tree through flat
+    per-level row indices (parent_row, u_target_row, u_source_row,
+    leaf_atom_row) fed to index_add_/gather -- it never assumes those rows
+    all come from a single structure. So concatenating N structures' level-l
+    tensors and shifting structure i's row indices by the running box count
+    from structures 0..i-1 gives one tree that NeuralFMMBlock.forward
+    runs through completely unchanged, in a single batched pass, while every
+    M2M/M2L/L2L gather-scatter still only ever mixes boxes/atoms belonging
+    to the same original structure (no cross-structure edges are added).
+
+    This is what lets DeepNeuralFMM run once per training batch instead of
+    once per structure.
+    """
+    depth = trees[0].depth
+    n_levels = depth + 1
+
+    merged_levels = []
+    box_offset = [0] * n_levels
+
+    per_level_positions = [[] for _ in range(n_levels)]
+    per_level_codes = [[] for _ in range(n_levels)]
+    per_level_parent_row = [[] for _ in range(n_levels)]
+    per_level_u_target = [[] for _ in range(n_levels)]
+    per_level_u_source = [[] for _ in range(n_levels)]
+    leaf_atom_rows = []
+
+    for tree in trees:
+        assert tree.depth == depth, "merge_trees requires every tree to share the same depth"
+        # Snapshot the offsets from *previous* trees only: levels within
+        # this tree are processed root-to-leaf below, so box_offset[l - 1]
+        # would otherwise already include this same tree's own level-(l-1)
+        # boxes (added a moment ago) by the time level l is reached.
+        start_offset = list(box_offset)
+
+        for l in range(n_levels):
+            level = tree.levels[l]
+            n_boxes = level.positions.shape[0]
+
+            per_level_positions[l].append(level.positions)
+            per_level_codes[l].append(level.codes)
+
+            if level.parent_row is not None:
+                per_level_parent_row[l].append(level.parent_row + start_offset[l - 1])
+            if level.u_target_row is not None:
+                per_level_u_target[l].append(level.u_target_row + start_offset[l])
+                per_level_u_source[l].append(level.u_source_row + start_offset[l])
+            if level.leaf_atom_row is not None:
+                # leaf_atom_row's VALUES are box rows at this (leaf) level,
+                # one entry per atom -- so offset by the leaf level's running
+                # box count, not an atom count.
+                leaf_atom_rows.append(level.leaf_atom_row + start_offset[l])
+
+            box_offset[l] += n_boxes
+
+    def _cat(chunks):
+        return torch.cat(chunks, dim=0) if chunks else None
+
+    for l in range(n_levels):
+        merged_levels.append(
+            LevelInfo(
+                codes=np.concatenate(per_level_codes[l]),
+                code_to_row=None,  # only needed while building, not by NeuralFMMBlock
+                positions=_cat(per_level_positions[l]),
+                parent_row=_cat(per_level_parent_row[l]),
+                u_target_row=_cat(per_level_u_target[l]),
+                u_source_row=_cat(per_level_u_source[l]),
+                leaf_atom_row=_cat(leaf_atom_rows) if l == depth else None,
+            )
+        )
+
+    return Octree(depth=depth, levels=merged_levels)

@@ -6,6 +6,7 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from .dataset import list_collate
+from .fmm.octree import merge_trees
 
 
 class TrainConfig:
@@ -39,9 +40,12 @@ class TrainConfig:
 
 
 class Trainer:
-    """Per-atom energy MSE + force MSE training loop. The model consumes one
-    structure at a time (see ARCHITECTURE.md), so a "batch" is a list of
-    structures whose losses get averaged before a single optimizer step.
+    """Per-atom energy MSE + force MSE training loop. A "batch" of
+    structures is concatenated into one block-diagonal graph/tree and run
+    through the model as a single forward+backward call (see
+    `NeuralFMM4GHDNN.compute_batched`/`energy_and_forces_batched`), not
+    looped over one structure at a time -- this dataset has a uniform atom
+    count per structure, which is what makes that batching valid.
     """
 
     def __init__(self, model, model_config, species_map, train_dataset, val_dataset, config):
@@ -83,45 +87,53 @@ class Trainer:
             if train:
                 self.optimizer.zero_grad()
 
-            batch_loss = 0.0
-            batch_e_mae = torch.zeros((), device=device)
-            batch_f_mae = torch.zeros((), device=device)
-            for sample in batch:
-                sys_ = sample.system.to(device)
-                energy_true = sample.energy.to(device)
-                forces_true = sample.forces.to(device)
-                n_atoms = sys_.num_atoms()
+            positions_list, species_list, cell_list, charge_list = [], [], [], []
+            n_atoms_list, trees = [], []
+            energy_true = torch.empty(len(batch), device=device)
+            forces_true_list = []
 
-                tree = None
+            for i, sample in enumerate(batch):
+                sys_ = sample.system.to(device)
+                positions_list.append(sys_.positions)
+                species_list.append(sys_.species)
+                cell_list.append(sys_.cell)
+                charge_list.append(sys_.total_charge)
+                n_atoms_list.append(sys_.num_atoms())
+                energy_true[i] = sample.energy.to(device)
+                forces_true_list.append(sample.forces.to(device))
+
                 if self.model.use_neural_fmm:
                     # Built once on CPU and cached on `sample.system` (which
                     # outlives this batch/epoch) -- positions never change
                     # across epochs, so this is a cache hit after epoch 1
                     # instead of a fresh GPU-sync + Python rebuild every step.
-                    tree = sample.system.get_octree(self.model.tree_depth, device)
+                    trees.append(sample.system.get_octree(self.model.tree_depth, device))
 
-                out = self.model.energy_and_forces(
-                    sys_.positions, sys_.species, sys_.cell, sys_.total_charge, tree=tree
-                )
-                e_loss = ((out["energy"] - energy_true) / n_atoms) ** 2
-                f_loss = ((out["forces"] - forces_true) ** 2).mean()
-                loss = cfg.energy_weight * e_loss + cfg.force_weight * f_loss
-                batch_loss = batch_loss + loss
+            tree = merge_trees(trees) if trees else None
+            out = self.model.energy_and_forces_batched(positions_list, species_list, cell_list, charge_list, tree=tree)
 
-                batch_e_mae = batch_e_mae + (out["energy"] - energy_true).abs().detach() / n_atoms
-                batch_f_mae = batch_f_mae + (out["forces"] - forces_true).abs().mean().detach()
-                n_samples += 1
-
-            batch_loss = batch_loss / len(batch)
+            n_atoms = torch.tensor(n_atoms_list, device=device, dtype=out["energy"].dtype)
+            e_loss = ((out["energy"] - energy_true) / n_atoms) ** 2  # (B,)
+            f_loss = torch.stack(
+                [((f - ft) ** 2).mean() for f, ft in zip(out["forces"], forces_true_list)]
+            )  # (B,)
+            per_sample_loss = cfg.energy_weight * e_loss + cfg.force_weight * f_loss
+            batch_loss = per_sample_loss.mean()
 
             if train:
                 batch_loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.grad_clip)
                 self.optimizer.step()
 
+            batch_e_mae = ((out["energy"] - energy_true).abs().detach() / n_atoms).sum()
+            batch_f_mae = torch.stack(
+                [(f - ft).abs().mean().detach() for f, ft in zip(out["forces"], forces_true_list)]
+            ).sum()
+
             total_loss += batch_loss.detach() * len(batch)
             total_e_mae += batch_e_mae
             total_f_mae += batch_f_mae
+            n_samples += len(batch)
 
             # one sync per batch (not per sample) just to refresh the bar
             loss_val, f_mae_val = (total_loss / n_samples).item(), (total_f_mae / n_samples).item()

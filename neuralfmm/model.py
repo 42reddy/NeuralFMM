@@ -2,11 +2,11 @@ import torch
 import torch.nn as nn
 
 from .electronegativity.heads import FarFieldCorrectionHead, LocalElectronegativityHead, LocalEnergyHead
-from .electrostatics import ewald_matrix
+from .electrostatics import ewald_matrix, ewald_matrix_batched
 from .fmm.blocks import DeepNeuralFMM
-from .fmm.octree import build_octree
+from .fmm.octree import build_octree, merge_trees
 from .local.painn import PaiNN
-from .qeq import electrostatic_energy, solve_qeq
+from .qeq import electrostatic_energy, electrostatic_energy_batched, solve_qeq, solve_qeq_batched
 
 
 class NeuralFMM4GHDNN(nn.Module):
@@ -99,4 +99,81 @@ class NeuralFMM4GHDNN(nn.Module):
         (forces,) = torch.autograd.grad(out["energy"], positions, create_graph=self.training)
         out["forces"] = -forces
         out["positions"] = positions
+        return out
+
+    def compute_batched(self, positions_list, species_list, cell_list, total_charge_list, tree=None):
+        """Batched version of `compute`: one structure's worth of energy per
+        entry, but the whole batch runs through PaiNN/QEq/Ewald/the FMM tree
+        as a single set of ops instead of once per structure -- see
+        `PaiNN.forward_batched`, `ewald_matrix_batched`, `solve_qeq_batched`,
+        and `fmm.octree.merge_trees` for how each stage stays batched.
+        Requires a uniform atom count across the batch (true for this
+        dataset; each `positions_list[i]` still keeps its own cell, so
+        structures need not be otherwise identical).
+        """
+        n_atoms_list = [p.shape[0] for p in positions_list]
+        b = len(positions_list)
+        n = n_atoms_list[0]
+        assert all(x == n for x in n_atoms_list), "compute_batched requires a uniform atom count across the batch"
+
+        flat_positions = torch.cat(positions_list, dim=0)
+        flat_species = torch.cat(species_list, dim=0)
+        batch_idx = torch.repeat_interleave(
+            torch.arange(b, device=flat_positions.device), torch.tensor(n_atoms_list, device=flat_positions.device)
+        )
+
+        s, _v = self.local.forward_batched(positions_list, flat_species, cell_list)
+        chi, hardness = self.chi_head(flat_species, s)
+        e_local = self.energy_head(flat_species, s)
+
+        if self.use_neural_fmm:
+            if tree is None:
+                tree = merge_trees([build_octree(p, c, self.tree_depth) for p, c in zip(positions_list, cell_list)])
+            farfield_latent = self.deep_fmm(s, tree)
+            delta_chi, e_far = self.farfield_head(farfield_latent)
+            chi = chi + delta_chi
+        else:
+            e_far = torch.zeros_like(e_local)
+
+        cell_stacked = torch.stack(cell_list, dim=0)
+        chi_stacked = chi.view(b, n)
+        hardness_stacked = hardness.view(b, n)
+        positions_stacked = flat_positions.view(b, n, 3)
+        total_charge_t = torch.as_tensor(total_charge_list, device=flat_positions.device, dtype=flat_positions.dtype)
+
+        coulomb_mat = ewald_matrix_batched(
+            positions_stacked, cell_stacked, self.ewald_alpha, self.ewald_r_cutoff, self.ewald_kmax
+        )
+        q, lam = solve_qeq_batched(chi_stacked, hardness_stacked, coulomb_mat, total_charge_t)
+        e_es = electrostatic_energy_batched(chi_stacked, q, coulomb_mat, hardness_stacked)  # (B,)
+
+        e_local_total = torch.zeros(b, device=flat_positions.device, dtype=flat_positions.dtype)
+        e_local_total.index_add_(0, batch_idx, e_local)
+        e_far_total = torch.zeros(b, device=flat_positions.device, dtype=flat_positions.dtype)
+        e_far_total.index_add_(0, batch_idx, e_far)
+
+        energy = e_local_total + e_es + e_far_total  # (B,)
+
+        return {
+            "energy": energy,
+            "charges": q,
+            "lagrange_multiplier": lam,
+            "chi": chi_stacked,
+            "hardness": hardness_stacked,
+            "e_local": e_local_total,
+            "e_electrostatic": e_es,
+            "e_farfield": e_far_total,
+        }
+
+    def energy_and_forces_batched(self, positions_list, species_list, cell_list, total_charge_list, tree=None):
+        """Batched version of `energy_and_forces`: one autograd.grad call
+        over the whole batch's summed energy produces every structure's
+        forces in a single backward pass (structures never share edges, so
+        d(sum of energies)/d(structure i's positions) is exactly that
+        structure's own force -- no cross-structure leakage)."""
+        positions_list = [p.detach().clone().requires_grad_(True) for p in positions_list]
+        out = self.compute_batched(positions_list, species_list, cell_list, total_charge_list, tree=tree)
+        grads = torch.autograd.grad(out["energy"].sum(), positions_list, create_graph=self.training)
+        out["forces"] = [-g for g in grads]
+        out["positions"] = positions_list
         return out
