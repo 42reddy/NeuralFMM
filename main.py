@@ -24,7 +24,7 @@ MAX_VAL_SAMPLES = None  # None = use all 50 test structures
 # ----------------------------------------------------------------------
 # Model
 # ----------------------------------------------------------------------
-USE_NEURAL_FMM = True
+USE_NEURAL_FMM = False
 
 MODEL_HYPERPARAMS = dict(
     hidden_dim=256,
