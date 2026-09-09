@@ -51,3 +51,19 @@ def periodic_neighbor_list(positions, cell, cutoff):
     shifts = shift_grid[shift_idx[mask]].to(torch.long)
     vectors = vec[mask]
     return edge_index, shifts, vectors
+
+
+def edge_vectors(positions, cell, edge_index, shifts):
+    """Recompute r_ij for a fixed (cached) edge_index/shifts topology from
+    the current `positions` -- cheap (gather + matmul) and, unlike
+    `periodic_neighbor_list`, does no data-dependent boolean-mask indexing,
+    so it never forces a GPU synchronize. Differentiable in `positions`, so
+    forces still flow correctly; only the *topology* (which pairs count as
+    neighbors) is treated as fixed, exactly like `fmm.octree`'s cached box
+    assignment -- both are discontinuous functions of position that get
+    built once from detached values, while every continuous quantity
+    (features, distances, energies) built on top keeps flowing gradients.
+    """
+    src, dst = edge_index
+    shift_cart = shifts.to(positions.dtype) @ cell
+    return (positions[dst] + shift_cart) - positions[src]

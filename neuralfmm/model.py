@@ -101,7 +101,7 @@ class NeuralFMM4GHDNN(nn.Module):
         out["positions"] = positions
         return out
 
-    def compute_batched(self, positions_list, species_list, cell_list, total_charge_list, tree=None):
+    def compute_batched(self, positions_list, species_list, cell_list, total_charge_list, tree=None, local_graphs=None):
         """Batched version of `compute`: one structure's worth of energy per
         entry, but the whole batch runs through PaiNN/QEq/Ewald/the FMM tree
         as a single set of ops instead of once per structure -- see
@@ -122,7 +122,7 @@ class NeuralFMM4GHDNN(nn.Module):
             torch.arange(b, device=flat_positions.device), torch.tensor(n_atoms_list, device=flat_positions.device)
         )
 
-        s, _v = self.local.forward_batched(positions_list, flat_species, cell_list)
+        s, _v = self.local.forward_batched(positions_list, flat_species, cell_list, graphs=local_graphs)
         chi, hardness = self.chi_head(flat_species, s)
         e_local = self.energy_head(flat_species, s)
 
@@ -165,14 +165,18 @@ class NeuralFMM4GHDNN(nn.Module):
             "e_farfield": e_far_total,
         }
 
-    def energy_and_forces_batched(self, positions_list, species_list, cell_list, total_charge_list, tree=None):
+    def energy_and_forces_batched(
+        self, positions_list, species_list, cell_list, total_charge_list, tree=None, local_graphs=None
+    ):
         """Batched version of `energy_and_forces`: one autograd.grad call
         over the whole batch's summed energy produces every structure's
         forces in a single backward pass (structures never share edges, so
         d(sum of energies)/d(structure i's positions) is exactly that
         structure's own force -- no cross-structure leakage)."""
         positions_list = [p.detach().clone().requires_grad_(True) for p in positions_list]
-        out = self.compute_batched(positions_list, species_list, cell_list, total_charge_list, tree=tree)
+        out = self.compute_batched(
+            positions_list, species_list, cell_list, total_charge_list, tree=tree, local_graphs=local_graphs
+        )
         grads = torch.autograd.grad(out["energy"].sum(), positions_list, create_graph=self.training)
         out["forces"] = [-g for g in grads]
         out["positions"] = positions_list

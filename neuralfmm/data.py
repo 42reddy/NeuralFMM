@@ -4,6 +4,7 @@ from pathlib import Path
 import torch
 
 from .fmm.octree import build_octree, move_tree_to
+from .local.neighbors import periodic_neighbor_list
 
 # Bulk liquid water, RPBE-D3 (dispersion-corrected DFT), 192 atoms/frame,
 # periodic. See data/README.md for provenance/citation. Source: the
@@ -34,6 +35,7 @@ class AtomicSystem:
         self.cell = cell
         self.total_charge = total_charge
         self._octree_cache = {}  # depth -> Octree, plus (depth, device) -> Octree
+        self._neighbor_cache = {}  # cutoff -> (edge_index, shifts), plus (cutoff, device) -> (edge_index, shifts)
 
     def to(self, *args, **kwargs):
         new = AtomicSystem(
@@ -43,6 +45,7 @@ class AtomicSystem:
             total_charge=self.total_charge,
         )
         new._octree_cache = self._octree_cache
+        new._neighbor_cache = self._neighbor_cache
         return new
 
     def num_atoms(self):
@@ -67,6 +70,33 @@ class AtomicSystem:
         if device_key not in self._octree_cache:
             self._octree_cache[device_key] = move_tree_to(tree, device)
         return self._octree_cache[device_key]
+
+    def get_neighbor_graph(self, cutoff, device=None):
+        """Neighbor-list *topology* (which atom pairs are within `cutoff`,
+        and by which periodic image) depends only on `positions`/`cell`,
+        fixed across epochs for a training sample -- same reasoning as
+        `get_octree`. Cached here as (edge_index, shifts); the caller
+        recomputes the actual (differentiable) r_ij vectors from these each
+        forward pass via `local.neighbors.edge_vectors`, so forces still
+        flow correctly through positions -- only the discrete "who's a
+        neighbor" decision is treated as fixed.
+
+        `periodic_neighbor_list` determines this via boolean-mask indexing,
+        which forces a GPU synchronize to learn the survivor count -- caching
+        it avoids paying that sync on every single forward pass/epoch.
+        """
+        if cutoff not in self._neighbor_cache:
+            edge_index, shifts, _ = periodic_neighbor_list(self.positions, self.cell, cutoff)
+            self._neighbor_cache[cutoff] = (edge_index, shifts)
+        edge_index, shifts = self._neighbor_cache[cutoff]
+
+        if device is None:
+            return edge_index, shifts
+        device = torch.device(device)
+        device_key = (cutoff, device)
+        if device_key not in self._neighbor_cache:
+            self._neighbor_cache[device_key] = (edge_index.to(device), shifts.to(device))
+        return self._neighbor_cache[device_key]
 
 
 def ensure_downloaded(url, dest):

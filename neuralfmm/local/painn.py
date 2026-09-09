@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 from ..utils.cutoffs import bessel_rbf, cosine_cutoff
-from .neighbors import periodic_neighbor_list
+from .neighbors import edge_vectors, periodic_neighbor_list
 
 
 class PaiNNMessage(nn.Module):
@@ -95,11 +95,15 @@ class PaiNN(nn.Module):
         )
         self.updates = nn.ModuleList([PaiNNUpdate(hidden_dim) for _ in range(n_layers)])
 
-    def forward(self, positions, species, cell):
-        edge_index, _, vectors = periodic_neighbor_list(positions, cell, self.r_cut)
+    def forward(self, positions, species, cell, graph=None):
+        if graph is None:
+            edge_index, shifts, _ = periodic_neighbor_list(positions, cell, self.r_cut)
+        else:
+            edge_index, shifts = graph
+        vectors = edge_vectors(positions, cell, edge_index, shifts)
         return self._run(species, edge_index, vectors)
 
-    def forward_batched(self, positions_list, species, cell_list):
+    def forward_batched(self, positions_list, species, cell_list, graphs=None):
         """Same computation as `forward`, but over N structures concatenated
         into one block-diagonal graph instead of looped one at a time.
 
@@ -108,6 +112,15 @@ class PaiNN(nn.Module):
         built separately -- this loop only builds index tensors, it does no
         model math). species: (sum(n_i),) already concatenated in the same
         structure order as positions_list.
+
+        graphs: optional length-N list of cached (edge_index, shifts) pairs
+        (see AtomicSystem.get_neighbor_graph) -- strongly recommended for
+        training, since `periodic_neighbor_list` does data-dependent
+        boolean-mask indexing that forces a GPU synchronize every call, and
+        this loop would otherwise pay that cost once per structure, every
+        forward pass, every epoch, even though the topology never changes
+        for a fixed training sample. When cached, only the differentiable
+        `edge_vectors` gather (no synchronize) runs here.
 
         Every edge stays within the structure it came from (src/dst are
         offset per structure, never cross-linked), so the shared
@@ -119,8 +132,12 @@ class PaiNN(nn.Module):
         """
         edge_chunks, vector_chunks = [], []
         offset = 0
-        for positions, cell in zip(positions_list, cell_list):
-            edge_index, _, vectors = periodic_neighbor_list(positions, cell, self.r_cut)
+        for i, (positions, cell) in enumerate(zip(positions_list, cell_list)):
+            if graphs is None:
+                edge_index, shifts, _ = periodic_neighbor_list(positions, cell, self.r_cut)
+            else:
+                edge_index, shifts = graphs[i]
+            vectors = edge_vectors(positions, cell, edge_index, shifts)
             edge_chunks.append(edge_index + offset)
             vector_chunks.append(vectors)
             offset += positions.shape[0]

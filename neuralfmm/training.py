@@ -88,7 +88,7 @@ class Trainer:
                 self.optimizer.zero_grad()
 
             positions_list, species_list, cell_list, charge_list = [], [], [], []
-            n_atoms_list, trees = [], []
+            n_atoms_list, trees, local_graphs = [], [], []
             energy_true = torch.empty(len(batch), device=device)
             forces_true_list = []
 
@@ -102,15 +102,19 @@ class Trainer:
                 energy_true[i] = sample.energy.to(device)
                 forces_true_list.append(sample.forces.to(device))
 
+                # Both caches below are built once on CPU (cheap) and cached
+                # on `sample.system` (which outlives this batch/epoch) --
+                # positions never change across epochs, so these are cache
+                # hits after epoch 1 instead of a fresh GPU-sync + Python/
+                # boolean-mask rebuild on every single forward pass.
+                local_graphs.append(sample.system.get_neighbor_graph(self.model.local.r_cut, device))
                 if self.model.use_neural_fmm:
-                    # Built once on CPU and cached on `sample.system` (which
-                    # outlives this batch/epoch) -- positions never change
-                    # across epochs, so this is a cache hit after epoch 1
-                    # instead of a fresh GPU-sync + Python rebuild every step.
                     trees.append(sample.system.get_octree(self.model.tree_depth, device))
 
             tree = merge_trees(trees) if trees else None
-            out = self.model.energy_and_forces_batched(positions_list, species_list, cell_list, charge_list, tree=tree)
+            out = self.model.energy_and_forces_batched(
+                positions_list, species_list, cell_list, charge_list, tree=tree, local_graphs=local_graphs
+            )
 
             n_atoms = torch.tensor(n_atoms_list, device=device, dtype=out["energy"].dtype)
             e_loss = ((out["energy"] - energy_true) / n_atoms) ** 2  # (B,)
