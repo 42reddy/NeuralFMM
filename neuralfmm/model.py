@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import torch
 import torch.nn as nn
 
@@ -34,19 +32,19 @@ class NeuralFMM4GHDNN(nn.Module):
 
     def __init__(
         self,
-        num_species: int,
-        hidden_dim: int = 64,
-        local_layers: int = 3,
-        n_rbf: int = 16,
-        local_r_cut: float = 5.0,
-        use_neural_fmm: bool = True,
-        tree_depth: int = 4,
-        fmm_hidden_dim: int = 64,
-        fmm_blocks: int = 3,
-        operator_depth: int = 2,
-        ewald_alpha: float = 0.3,
-        ewald_r_cutoff: float = 8.0,
-        ewald_kmax: int = 6,
+        num_species,
+        hidden_dim=64,
+        local_layers=3,
+        n_rbf=16,
+        local_r_cut=5.0,
+        use_neural_fmm=True,
+        tree_depth=4,
+        fmm_hidden_dim=64,
+        fmm_blocks=3,
+        operator_depth=2,
+        ewald_alpha=0.3,
+        ewald_r_cutoff=8.0,
+        ewald_kmax=6,
     ):
         super().__init__()
         self.use_neural_fmm = use_neural_fmm
@@ -62,13 +60,7 @@ class NeuralFMM4GHDNN(nn.Module):
         self.deep_fmm = DeepNeuralFMM(hidden_dim, fmm_hidden_dim, tree_depth, fmm_blocks, operator_depth)
         self.farfield_head = FarFieldCorrectionHead(fmm_hidden_dim)
 
-    def compute(
-        self,
-        positions: torch.Tensor,
-        species: torch.Tensor,
-        cell: torch.Tensor,
-        total_charge: float = 0.0,
-    ) -> dict:
+    def compute(self, positions, species, cell, total_charge=0.0):
         s, _v = self.local(positions, species, cell)
         chi, hardness = self.chi_head(species, s)
         e_local = self.energy_head(species, s)
@@ -100,13 +92,7 @@ class NeuralFMM4GHDNN(nn.Module):
             "e_farfield": e_far_total,
         }
 
-    def energy_and_forces(
-        self,
-        positions: torch.Tensor,
-        species: torch.Tensor,
-        cell: torch.Tensor,
-        total_charge: float = 0.0,
-    ) -> dict:
+    def energy_and_forces(self, positions, species, cell, total_charge=0.0):
         positions = positions.detach().clone().requires_grad_(True)
         out = self.compute(positions, species, cell, total_charge)
         (forces,) = torch.autograd.grad(out["energy"], positions, create_graph=self.training)

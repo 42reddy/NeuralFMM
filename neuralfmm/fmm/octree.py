@@ -1,9 +1,8 @@
-from dataclasses import dataclass, field
 import numpy as np
 import torch
 
 
-def _interleave_bits(ix: np.ndarray, iy: np.ndarray, iz: np.ndarray, bits: int) -> np.ndarray:
+def _interleave_bits(ix, iy, iz, bits):
     """Bit-interleaved (Morton) code from three `bits`-wide integer indices.
     Gives a natural 1D space-filling order used later as the RoPE position,
     and has the convenient property that the level-(l-1) parent of a
@@ -17,26 +16,38 @@ def _interleave_bits(ix: np.ndarray, iy: np.ndarray, iz: np.ndarray, bits: int) 
     return code
 
 
-@dataclass
 class LevelInfo:
-    codes: np.ndarray  # (n_boxes,) sorted ascending Morton codes, occupied boxes only
-    code_to_row: dict
-    positions: torch.Tensor  # (n_boxes,) RoPE position = Morton code itself
-    parent_row: torch.Tensor | None = None  # (n_boxes,) row into level l-1, absent at root
-    u_target_row: torch.Tensor | None = None  # (K,) M2L target rows at this level
-    u_source_row: torch.Tensor | None = None  # (K,) M2L source rows at this level
-    leaf_atom_row: torch.Tensor | None = None  # (N,) only set at the leaf level
+    """Everything the tree passes need about the occupied boxes at one level.
+
+    codes: (n_boxes,) sorted ascending Morton codes, occupied boxes only
+    code_to_row: dict, Morton code -> row index into this level's tensors
+    positions: (n_boxes,) RoPE position = Morton code itself
+    parent_row: (n_boxes,) row into level l-1, None at the root
+    u_target_row / u_source_row: (K,) M2L target/source rows at this level
+    leaf_atom_row: (N,) only set at the leaf level
+    """
+
+    def __init__(self, codes, code_to_row, positions, parent_row=None, u_target_row=None,
+                 u_source_row=None, leaf_atom_row=None):
+        self.codes = codes
+        self.code_to_row = code_to_row
+        self.positions = positions
+        self.parent_row = parent_row
+        self.u_target_row = u_target_row
+        self.u_source_row = u_source_row
+        self.leaf_atom_row = leaf_atom_row
 
 
 class Octree:
-    depth: int
-    levels: list = field(default_factory=list)  # LevelInfo per level, index 0 = root
+    def __init__(self, depth, levels=None):
+        self.depth = depth
+        self.levels = levels if levels is not None else []  # LevelInfo per level, index 0 = root
 
-    def leaf(self) -> LevelInfo:
+    def leaf(self):
         return self.levels[self.depth]
 
 
-def _grid_indices(positions: torch.Tensor, cell: torch.Tensor, grid_size: int) -> np.ndarray:
+def _grid_indices(positions, cell, grid_size):
     inv_cell = torch.linalg.inv(cell)
     frac = positions.detach() @ inv_cell
     frac = frac - torch.floor(frac)
@@ -44,7 +55,7 @@ def _grid_indices(positions: torch.Tensor, cell: torch.Tensor, grid_size: int) -
     return idx.cpu().numpy()
 
 
-def _near_neighbor_codes(ix: int, iy: int, iz: int, grid_size: int, bits: int) -> list[int]:
+def _near_neighbor_codes(ix, iy, iz, grid_size, bits):
     out = []
     for dx in (-1, 0, 1):
         for dy in (-1, 0, 1):
@@ -56,7 +67,7 @@ def _near_neighbor_codes(ix: int, iy: int, iz: int, grid_size: int, bits: int) -
     return out
 
 
-def build_octree(positions: torch.Tensor, cell: torch.Tensor, depth: int) -> Octree:
+def build_octree(positions, cell, depth):
     """Build a periodic (torus) sparse octree over the fractional coordinates
     of `positions` inside `cell`, down to `depth` levels (root = level 0,
     leaves = level `depth`). Only occupied boxes are stored at every level.
@@ -71,15 +82,11 @@ def build_octree(positions: torch.Tensor, cell: torch.Tensor, depth: int) -> Oct
     (small force discontinuities as atoms cross box boundaries) and the
     smooth-partition follow-up noted there.
     """
-    n_atoms = positions.shape[0]
-    device = positions.device
-
     leaf_idx = _grid_indices(positions, cell, 2 ** depth)  # (N, 3)
     leaf_codes = _interleave_bits(leaf_idx[:, 0], leaf_idx[:, 1], leaf_idx[:, 2], depth)
 
     tree = Octree(depth=depth)
-    child_row_of: dict[int, int] | None = None
-    child_codes_prev: np.ndarray | None = None
+    child_codes_prev = None
 
     for l in range(depth, -1, -1):
         shift = 3 * (depth - l)
@@ -90,18 +97,18 @@ def build_octree(positions: torch.Tensor, cell: torch.Tensor, depth: int) -> Oct
         info = LevelInfo(
             codes=uniq_codes,
             code_to_row=code_to_row,
-            positions=torch.as_tensor(uniq_codes, device=device, dtype=torch.float32),
+            positions=torch.as_tensor(uniq_codes, device=positions.device, dtype=torch.float32),
         )
 
         if l == depth:
-            info.leaf_atom_row = torch.as_tensor(inverse, device=device, dtype=torch.long)
+            info.leaf_atom_row = torch.as_tensor(inverse, device=positions.device, dtype=torch.long)
 
         if l < depth:
             # child_codes_prev are level (l+1) codes in *their own row order*;
             # parent row for each child = row of (child_code >> 3) at this level
             parent_codes = child_codes_prev >> 3
             parent_rows = np.array([code_to_row[int(c)] for c in parent_codes], dtype=np.int64)
-            tree.levels[-1].parent_row = torch.as_tensor(parent_rows, device=device, dtype=torch.long)
+            tree.levels[-1].parent_row = torch.as_tensor(parent_rows, device=positions.device, dtype=torch.long)
 
         child_codes_prev = uniq_codes
         tree.levels.append(info)
@@ -144,8 +151,8 @@ def build_octree(positions: torch.Tensor, cell: torch.Tensor, depth: int) -> Oct
                     targets.append(tgt_row)
                     sources.append(code_to_row[scode])
 
-            info.u_target_row = torch.as_tensor(targets, device=device, dtype=torch.long)
-            info.u_source_row = torch.as_tensor(sources, device=device, dtype=torch.long)
+            info.u_target_row = torch.as_tensor(targets, device=positions.device, dtype=torch.long)
+            info.u_source_row = torch.as_tensor(sources, device=positions.device, dtype=torch.long)
 
     tree.levels.reverse()  # index 0 = root, index depth = leaf
     return tree

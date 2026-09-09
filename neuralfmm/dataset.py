@@ -1,17 +1,17 @@
-from dataclasses import dataclass
 import torch
 from torch.utils.data import Dataset
-from .data import AtomicSystem
+
+from .data import AtomicSystem, download_water_dataset
 
 
-@dataclass
 class Sample:
-    system: AtomicSystem
-    energy: torch.Tensor  # scalar
-    forces: torch.Tensor  # (N, 3)
+    def __init__(self, system, energy, forces):
+        self.system = system  # AtomicSystem
+        self.energy = energy  # scalar tensor
+        self.forces = forces  # (N, 3) tensor
 
 
-def build_species_map(symbols: list[str]) -> dict[str, int]:
+def build_species_map(symbols):
     """Deterministic symbol -> zero-indexed id map, ordered by atomic number
     so it doesn't depend on the order species happen to first appear in a
     given file (important: this map must be identical between training and
@@ -22,19 +22,14 @@ def build_species_map(symbols: list[str]) -> dict[str, int]:
     return {s: i for i, s in enumerate(unique)}
 
 
-def load_extxyz(
-    path: str,
-    species_map: dict[str, int] | None = None,
-    total_charge: float = 0.0,
-    max_samples: int | None = None,
-) -> tuple[list[Sample], dict[str, int]]:
+def load_extxyz(path, species_map=None, total_charge=0.0, max_samples=None):
     """Load an extxyz trajectory (ASE-readable) with per-frame `energy` and
     per-atom `forces` into a list of Samples. If `species_map` is None, one
     is built from every symbol seen in the file (pass the training set's map
     explicitly when loading a val/test file so indices line up)."""
     import ase.io
 
-    frames = ase.io.read(path, index=":")
+    frames = ase.io.read(str(path), index=":")
     if max_samples is not None:
         frames = frames[:max_samples]
 
@@ -58,18 +53,32 @@ def load_extxyz(
 
 
 class AtomicDataset(Dataset):
-    def __init__(self, samples: list[Sample]):
+    def __init__(self, samples):
         self.samples = samples
 
-    def __len__(self) -> int:
+    def __len__(self):
         return len(self.samples)
 
-    def __getitem__(self, idx: int) -> Sample:
+    def __getitem__(self, idx):
         return self.samples[idx]
 
 
-def list_collate(batch: list[Sample]) -> list[Sample]:
+def list_collate(batch):
     """No-op collate: the model consumes one structure at a time (see
     ARCHITECTURE.md's batching caveat), so a "batch" here is just the list of
     samples a training step loops over and averages the loss across."""
     return batch
+
+
+def prepare_water_dataset(data_dir="data", total_charge=0.0, max_train_samples=None, max_val_samples=None):
+    """End-to-end: download the bundled bulk-water RPBE-D3 benchmark (if not
+    already cached in `data_dir`), parse it, and return ready-to-train torch
+    Datasets plus the species map used to build them."""
+    train_path, test_path = download_water_dataset(data_dir)
+
+    train_samples, species_map = load_extxyz(train_path, total_charge=total_charge, max_samples=max_train_samples)
+    val_samples, _ = load_extxyz(
+        test_path, species_map=species_map, total_charge=total_charge, max_samples=max_val_samples
+    )
+
+    return AtomicDataset(train_samples), AtomicDataset(val_samples), species_map

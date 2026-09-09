@@ -2,7 +2,7 @@ import math
 import torch
 
 
-def apply_rope(x: torch.Tensor, pos: torch.Tensor, base: float = 10000.0) -> torch.Tensor:
+def apply_rope(x, pos, base=10000.0):
     """Rotary position embedding applied along the last (feature) dim.
 
     x: (..., F) with F even

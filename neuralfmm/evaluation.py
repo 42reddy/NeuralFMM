@@ -1,0 +1,222 @@
+"""Evaluation metrics that go beyond plain MAE -- MAE alone can look fine
+while the model gets the *shape* of the potential energy surface, the
+*direction* of forces, or the basic chemistry of the predicted charges
+wrong. See Evaluator.evaluate() for the full list.
+"""
+import json
+from pathlib import Path
+
+import numpy as np
+import torch
+
+from .model import NeuralFMM4GHDNN
+
+
+def load_evaluator_from_checkpoint(checkpoint_dir, checkpoint_name="best.pt", device="cpu"):
+    """Rebuild a model from a checkpoint saved by Trainer and wrap it in an
+    Evaluator. checkpoint_dir must contain config.json (model_config +
+    species_map, written by Trainer) and the checkpoint file itself."""
+    checkpoint_dir = Path(checkpoint_dir)
+    with open(checkpoint_dir / "config.json") as f:
+        cfg = json.load(f)
+    model = NeuralFMM4GHDNN(**cfg["model_config"])
+    ckpt = torch.load(checkpoint_dir / checkpoint_name, map_location=device)
+    model.load_state_dict(ckpt["model_state"])
+    return Evaluator(model, cfg["species_map"], device=device)
+
+
+class Evaluator:
+    def __init__(self, model, species_map, device="cpu"):
+        self.model = model.to(device)
+        self.model.eval()
+        self.species_map = species_map
+        self.device = device
+
+    # ---- prediction collection ----
+
+    def collect_predictions(self, samples):
+        energies_true, energies_pred = [], []
+        forces_true, forces_pred = [], []
+        n_atoms_list = []
+        charges_pred, species_all, neutrality_residual = [], [], []
+
+        for sample in samples:
+            sys_ = sample.system.to(self.device)
+            out = self.model.energy_and_forces(sys_.positions, sys_.species, sys_.cell, sys_.total_charge)
+
+            energies_true.append(sample.energy.item())
+            energies_pred.append(out["energy"].item())
+            forces_true.append(sample.forces.detach().cpu().numpy())
+            forces_pred.append(out["forces"].detach().cpu().numpy())
+            n_atoms_list.append(sys_.num_atoms())
+
+            q = out["charges"].detach().cpu().numpy()
+            charges_pred.append(q)
+            species_all.append(sys_.species.cpu().numpy())
+            neutrality_residual.append(q.sum())
+
+        return {
+            "energies_true": np.array(energies_true),
+            "energies_pred": np.array(energies_pred),
+            "forces_true": forces_true,
+            "forces_pred": forces_pred,
+            "n_atoms": np.array(n_atoms_list),
+            "charges_pred": charges_pred,
+            "species": species_all,
+            "neutrality_residual": np.array(neutrality_residual),
+        }
+
+    # ---- metrics ----
+
+    def energy_metrics(self, pred):
+        e_true, e_pred, n = pred["energies_true"], pred["energies_pred"], pred["n_atoms"]
+        err = e_pred - e_true
+        err_per_atom = err / n
+        return {
+            "energy_MAE_total": float(np.mean(np.abs(err))),
+            "energy_RMSE_total": float(np.sqrt(np.mean(err**2))),
+            "energy_MAE_per_atom": float(np.mean(np.abs(err_per_atom))),
+            "energy_RMSE_per_atom": float(np.sqrt(np.mean(err_per_atom**2))),
+        }
+
+    def force_metrics(self, pred):
+        f_true = np.concatenate([f.reshape(-1, 3) for f in pred["forces_true"]], axis=0)
+        f_pred = np.concatenate([f.reshape(-1, 3) for f in pred["forces_pred"]], axis=0)
+        err = f_pred - f_true
+
+        mag_true = np.linalg.norm(f_true, axis=-1)
+        mag_pred = np.linalg.norm(f_pred, axis=-1)
+        cos_sim = np.sum(f_true * f_pred, axis=-1) / (mag_true * mag_pred + 1e-8)
+        # undefined direction when the reference force is ~0; exclude those atoms
+        valid = mag_true > 1e-3
+
+        return {
+            "force_MAE": float(np.mean(np.abs(err))),
+            "force_RMSE": float(np.sqrt(np.mean(err**2))),
+            "force_cosine_similarity_mean": float(np.mean(cos_sim[valid])),
+            "force_cosine_similarity_median": float(np.median(cos_sim[valid])),
+            "force_well_directed_frac_cos>0.9": float(np.mean(cos_sim[valid] > 0.9)),
+            "force_magnitude_relative_error_median": float(
+                np.median(np.abs(mag_pred[valid] - mag_true[valid]) / mag_true[valid])
+            ),
+        }
+
+    def energy_ranking_metrics(self, pred):
+        from scipy.stats import spearmanr
+
+        if len(pred["energies_true"]) < 3:
+            return {"energy_spearman_rho": None}
+        rho, _ = spearmanr(pred["energies_true"], pred["energies_pred"])
+        return {"energy_spearman_rho": float(rho)}
+
+    def charge_chemistry_metrics(self, pred):
+        inv_map = {v: k for k, v in self.species_map.items()}
+        all_species = np.concatenate(pred["species"])
+        all_charges = np.concatenate(pred["charges_pred"])
+
+        per_species = {}
+        for sid, symbol in inv_map.items():
+            mask = all_species == sid
+            if mask.sum() == 0:
+                continue
+            per_species[symbol] = {
+                "mean_charge": float(all_charges[mask].mean()),
+                "std_charge": float(all_charges[mask].std()),
+            }
+
+        return {
+            "per_species_charge": per_species,
+            "neutrality_residual_max_abs": float(np.max(np.abs(pred["neutrality_residual"]))),
+            "neutrality_residual_mean_abs": float(np.mean(np.abs(pred["neutrality_residual"]))),
+        }
+
+    def force_energy_consistency_check(self, samples, n_checks=5, eps=1e-4, seed=0):
+        """Confirms autograd forces really are -dE/dR for this trained
+        model: a correctness gate (should always pass to ~O(eps^2)), not an
+        accuracy metric -- included because a training bug that corrupts
+        this would otherwise be invisible in MAE numbers."""
+        rng = np.random.default_rng(seed)
+        errors = []
+        for sample in samples[:n_checks]:
+            sys_ = sample.system.to(self.device)
+            out = self.model.energy_and_forces(sys_.positions, sys_.species, sys_.cell, sys_.total_charge)
+            direction = torch.tensor(rng.normal(size=sys_.positions.shape), dtype=sys_.positions.dtype)
+            direction = direction / direction.norm()
+
+            predicted_de = -(out["forces"].detach() * direction).sum().item() * eps
+            e0 = out["energy"].item()
+            pos_step = sys_.positions.detach() + eps * direction
+            e1 = self.model.compute(pos_step, sys_.species, sys_.cell, sys_.total_charge)["energy"].item()
+            actual_de = e1 - e0
+            errors.append(abs(actual_de - predicted_de))
+        return {
+            "force_energy_consistency_max_abs_error": float(np.max(errors)),
+            "force_energy_consistency_note": f"step size eps={eps}, error should scale ~eps^2",
+        }
+
+    def long_range_decay_test(self, max_separation=15.0, n_steps=8):
+        """Two small synthetic clusters (built from whatever species this
+        model was trained on) placed at increasing separation inside a large
+        periodic box. Reports E_interaction(R) = E(both) - E(A alone) - E(B
+        alone) as a function of separation R. Uses no dataset labels --
+        directly probes whether the far-field pathway behaves sensibly
+        (decays with distance rather than blowing up or staying flat), and
+        is the metric to compare between a use_neural_fmm=False and =True
+        checkpoint.
+        """
+
+        def cluster(species_ids, center, spread, seed):
+            rng = np.random.default_rng(seed)
+            offsets = rng.normal(scale=spread, size=(len(species_ids), 3))
+            positions = torch.tensor(center + offsets, dtype=torch.float32)
+            species = torch.tensor(species_ids, dtype=torch.long)
+            return positions, species
+
+        species_ids = list(self.species_map.values())
+        n_a, n_b = 3, 3
+        cluster_a_species = [species_ids[i % len(species_ids)] for i in range(n_a)]
+        cluster_b_species = [species_ids[(i + 1) % len(species_ids)] for i in range(n_b)]
+
+        # generous margin beyond max_separation so the periodic image of one
+        # cluster doesn't itself sit within interaction range of the other
+        # and confound the decay curve we're trying to measure
+        box = 2.5 * max_separation + 10.0
+        cell = torch.eye(3) * box
+
+        pos_a, spec_a = cluster(cluster_a_species, np.array([2.0, box / 2, box / 2]), 0.4, seed=1)
+        pos_b_local, spec_b = cluster(cluster_b_species, np.array([0.0, 0.0, 0.0]), 0.4, seed=2)
+
+        def energy_of(positions, species):
+            return self.model.compute(positions, species, cell, total_charge=0.0)["energy"].item()
+
+        e_a = energy_of(pos_a, spec_a)
+        far_offset = np.array([box - 2.0, box / 2, box / 2])
+        e_b = energy_of(pos_b_local + torch.tensor(far_offset, dtype=torch.float32), spec_b)
+
+        results = []
+        combined_species = torch.cat([spec_a, spec_b])
+        for r in np.linspace(3.0, max_separation, n_steps):
+            offset = np.array([2.0 + r, box / 2, box / 2])
+            pos_b = pos_b_local + torch.tensor(offset, dtype=torch.float32)
+            combined_pos = torch.cat([pos_a, pos_b], dim=0)
+            e_ab = energy_of(combined_pos, combined_species)
+            results.append((float(r), e_ab - e_a - e_b))
+
+        return results
+
+    # ---- top-level entry point ----
+
+    def evaluate(self, samples, decay_test=False, decay_max_separation=15.0, decay_steps=8):
+        pred = self.collect_predictions(samples)
+
+        report = {}
+        report.update(self.energy_metrics(pred))
+        report.update(self.force_metrics(pred))
+        report.update(self.energy_ranking_metrics(pred))
+        report.update(self.charge_chemistry_metrics(pred))
+        report.update(self.force_energy_consistency_check(samples))
+
+        if decay_test:
+            report["long_range_decay"] = self.long_range_decay_test(decay_max_separation, decay_steps)
+
+        return report

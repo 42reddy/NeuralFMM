@@ -13,7 +13,7 @@ class PaiNNMessage(nn.Module):
     other vectors and elementwise gates that are themselves invariant scalars.
     """
 
-    def __init__(self, hidden_dim: int, n_rbf: int, r_cut: float):
+    def __init__(self, hidden_dim, n_rbf, r_cut):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.r_cut = r_cut
@@ -49,7 +49,7 @@ class PaiNNMessage(nn.Module):
 class PaiNNUpdate(nn.Module):
     """Intra-atomic mixing block: mixes s and v while preserving equivariance."""
 
-    def __init__(self, hidden_dim: int):
+    def __init__(self, hidden_dim):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.U = nn.Linear(hidden_dim, hidden_dim, bias=False)
@@ -85,14 +85,7 @@ class PaiNN(nn.Module):
     descriptor used by the 4G-HDNN-style local electronegativity/energy heads.
     """
 
-    def __init__(
-        self,
-        num_species: int,
-        hidden_dim: int = 64,
-        n_layers: int = 3,
-        n_rbf: int = 16,
-        r_cut: float = 5.0,
-    ):
+    def __init__(self, num_species, hidden_dim=64, n_layers=3, n_rbf=16, r_cut=5.0):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.r_cut = r_cut
@@ -102,7 +95,7 @@ class PaiNN(nn.Module):
         )
         self.updates = nn.ModuleList([PaiNNUpdate(hidden_dim) for _ in range(n_layers)])
 
-    def forward(self, positions: torch.Tensor, species: torch.Tensor, cell: torch.Tensor):
+    def forward(self, positions, species, cell):
         edge_index, _, vectors = periodic_neighbor_list(positions, cell, self.r_cut)
 
         s = self.embedding(species)

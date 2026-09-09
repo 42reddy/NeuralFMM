@@ -1,11 +1,10 @@
 import torch
 import torch.nn as nn
 
-from .octree import Octree
 from .rope import apply_rope
 
 
-def _mlp(in_dim: int, out_dim: int, depth: int = 2) -> nn.Sequential:
+def _mlp(in_dim, out_dim, depth=2):
     layers = []
     d = in_dim
     for _ in range(depth - 1):
@@ -23,7 +22,7 @@ class NeuralFMMBlock(nn.Module):
     spatial awareness the level-shared MLPs would otherwise lack.
     """
 
-    def __init__(self, hidden_dim: int, depth: int, operator_depth: int = 2):
+    def __init__(self, hidden_dim, depth, operator_depth=2):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.depth = depth
@@ -34,8 +33,8 @@ class NeuralFMMBlock(nn.Module):
         self.t_ifo = nn.ModuleList([_mlp(hidden_dim, hidden_dim, operator_depth) for _ in range(depth + 1)])
         self.t_tfi = _mlp(hidden_dim, hidden_dim, operator_depth)
 
-    def forward(self, atom_features: torch.Tensor, tree: Octree) -> torch.Tensor:
-        leaf = tree.leaf
+    def forward(self, atom_features, tree):
+        leaf = tree.leaf()
         n_leaf_boxes = leaf.codes.shape[0]
         box_feat = torch.zeros(n_leaf_boxes, self.hidden_dim, device=atom_features.device, dtype=atom_features.dtype)
         box_feat.index_add_(0, leaf.leaf_atom_row, atom_features)
@@ -83,14 +82,7 @@ class DeepNeuralFMM(nn.Module):
     Q) from Eq. 1 of the paper, with K_t = NeuralFMMBlock.
     """
 
-    def __init__(
-        self,
-        in_dim: int,
-        hidden_dim: int = 64,
-        depth: int = 4,
-        n_blocks: int = 3,
-        operator_depth: int = 2,
-    ):
+    def __init__(self, in_dim, hidden_dim=64, depth=4, n_blocks=3, operator_depth=2):
         super().__init__()
         self.depth = depth
         self.lifting = nn.Linear(in_dim, hidden_dim)
@@ -101,7 +93,7 @@ class DeepNeuralFMM(nn.Module):
         self.act = nn.SiLU()
         self.projection = nn.Linear(hidden_dim, hidden_dim)
 
-    def forward(self, atom_features: torch.Tensor, tree: Octree) -> torch.Tensor:
+    def forward(self, atom_features, tree):
         x = self.lifting(atom_features)
         for block, local in zip(self.blocks, self.local_mix):
             x = self.act(local(x) + block(x, tree))

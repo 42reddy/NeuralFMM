@@ -1,9 +1,8 @@
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
-def _mlp(in_dim: int, out_dim: int, hidden_dim: int) -> nn.Sequential:
+def _mlp(in_dim, out_dim, hidden_dim):
     return nn.Sequential(
         nn.Linear(in_dim, hidden_dim),
         nn.SiLU(),
@@ -18,7 +17,7 @@ class LocalElectronegativityHead(nn.Module):
     `use_neural_fmm=False`.
     """
 
-    def __init__(self, num_species: int, feat_dim: int, hidden_dim: int = 64):
+    def __init__(self, num_species, feat_dim, hidden_dim=64):
         super().__init__()
         self.chi0 = nn.Embedding(num_species, 1)
         self.hardness0 = nn.Embedding(num_species, 1)
@@ -29,7 +28,7 @@ class LocalElectronegativityHead(nn.Module):
         nn.init.zeros_(self.hardness_mlp[-1].weight)
         nn.init.zeros_(self.hardness_mlp[-1].bias)
 
-    def forward(self, species: torch.Tensor, feat: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, species, feat):
         chi = self.chi0(species).squeeze(-1) + self.chi_mlp(feat).squeeze(-1)
         hardness = F.softplus(self.hardness0(species).squeeze(-1)) + F.softplus(
             self.hardness_mlp(feat).squeeze(-1)
@@ -43,12 +42,12 @@ class LocalEnergyHead(nn.Module):
     long-range electrostatic/dispersion physics handled elsewhere.
     """
 
-    def __init__(self, num_species: int, feat_dim: int, hidden_dim: int = 64):
+    def __init__(self, num_species, feat_dim, hidden_dim=64):
         super().__init__()
         self.e0 = nn.Embedding(num_species, 1)
         self.mlp = _mlp(feat_dim, 1, hidden_dim)
 
-    def forward(self, species: torch.Tensor, feat: torch.Tensor) -> torch.Tensor:
+    def forward(self, species, feat):
         return self.e0(species).squeeze(-1) + self.mlp(feat).squeeze(-1)
 
 
@@ -62,12 +61,12 @@ class FarFieldCorrectionHead(nn.Module):
     a no-op and the model trains from the local/QEq baseline outward.
     """
 
-    def __init__(self, farfield_dim: int):
+    def __init__(self, farfield_dim):
         super().__init__()
         self.readout = nn.Linear(farfield_dim, 2)
         nn.init.zeros_(self.readout.weight)
         nn.init.zeros_(self.readout.bias)
 
-    def forward(self, farfield_feat: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, farfield_feat):
         out = self.readout(farfield_feat)
         return out[..., 0], out[..., 1]

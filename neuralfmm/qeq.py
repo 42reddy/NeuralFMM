@@ -1,14 +1,7 @@
-from __future__ import annotations
-
 import torch
 
 
-def solve_qeq(
-    chi: torch.Tensor,
-    hardness: torch.Tensor,
-    coulomb_matrix: torch.Tensor,
-    total_charge: float = 0.0,
-) -> tuple[torch.Tensor, torch.Tensor]:
+def solve_qeq(chi, hardness, coulomb_matrix, total_charge=0.0):
     """Charge equilibration: minimize E_ES(q) = chi.q + 0.5 q^T A q subject to
     sum(q) = total_charge, with A = coulomb_matrix + diag(hardness).
 
@@ -39,8 +32,6 @@ def solve_qeq(
     return q, lam
 
 
-def electrostatic_energy(
-    chi: torch.Tensor, q: torch.Tensor, coulomb_matrix: torch.Tensor, hardness: torch.Tensor
-) -> torch.Tensor:
+def electrostatic_energy(chi, q, coulomb_matrix, hardness):
     a = coulomb_matrix + torch.diag(hardness)
     return (chi * q).sum() + 0.5 * (q @ a @ q)

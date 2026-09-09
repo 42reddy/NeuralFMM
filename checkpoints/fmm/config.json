@@ -1,0 +1,21 @@
+{
+  "model_config": {
+    "hidden_dim": 64,
+    "local_layers": 3,
+    "n_rbf": 8,
+    "local_r_cut": 4.0,
+    "use_neural_fmm": true,
+    "tree_depth": 3,
+    "fmm_hidden_dim": 32,
+    "fmm_blocks": 2,
+    "operator_depth": 2,
+    "ewald_alpha": 0.35,
+    "ewald_r_cutoff": 5.5,
+    "ewald_kmax": 4,
+    "num_species": 2
+  },
+  "species_map": {
+    "H": 0,
+    "O": 1
+  }
+}

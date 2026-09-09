@@ -2,13 +2,13 @@ import math
 import torch
 
 
-def cosine_cutoff(r: torch.Tensor, r_cut: float) -> torch.Tensor:
+def cosine_cutoff(r, r_cut):
     """Smooth envelope, 1 at r=0, 0 at r=r_cut, zero derivative at both ends."""
     x = (r / r_cut).clamp(max=1.0)
     return 0.5 * (torch.cos(math.pi * x) + 1.0) * (r < r_cut)
 
 
-def bessel_rbf(r: torch.Tensor, r_cut: float, n_basis: int) -> torch.Tensor:
+def bessel_rbf(r, r_cut, n_basis):
     """DimeNet-style radial Bessel basis: sqrt(2/r_cut) * sin(n*pi*r/r_cut) / r.
 
     Safe at r -> 0 (limit is n*pi/r_cut).

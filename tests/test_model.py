@@ -1,4 +1,3 @@
-import pytest
 import torch
 
 from neuralfmm import NeuralFMM4GHDNN
@@ -30,39 +29,39 @@ def _make_model(use_neural_fmm, num_species=2):
     )
 
 
-@pytest.mark.parametrize("use_neural_fmm", [False, True])
-def test_forward_shapes_and_charge_neutrality(use_neural_fmm):
-    positions, species, cell = _make_system()
-    model = _make_model(use_neural_fmm)
-    out = model.compute(positions, species, cell, total_charge=0.0)
-    assert out["energy"].shape == ()
-    assert out["charges"].shape == (positions.shape[0],)
-    assert out["charges"].sum().abs().item() < 1e-4
+def test_forward_shapes_and_charge_neutrality():
+    for use_neural_fmm in (False, True):
+        positions, species, cell = _make_system()
+        model = _make_model(use_neural_fmm)
+        out = model.compute(positions, species, cell, total_charge=0.0)
+        assert out["energy"].shape == ()
+        assert out["charges"].shape == (positions.shape[0],)
+        assert out["charges"].sum().abs().item() < 1e-4
 
 
-@pytest.mark.parametrize("use_neural_fmm", [False, True])
-def test_forces_match_finite_differences(use_neural_fmm):
+def test_forces_match_finite_differences():
     torch.set_default_dtype(torch.float64)
     try:
-        positions, species, cell = _make_system(n_atoms=6, seed=1)
-        model = _make_model(use_neural_fmm).double()
-        with torch.no_grad():
-            for p in model.farfield_head.parameters():
-                p.add_(0.05 * torch.randn_like(p))
+        for use_neural_fmm in (False, True):
+            positions, species, cell = _make_system(n_atoms=6, seed=1)
+            model = _make_model(use_neural_fmm).double()
+            with torch.no_grad():
+                for p in model.farfield_head.parameters():
+                    p.add_(0.05 * torch.randn_like(p))
 
-        out = model.energy_and_forces(positions, species, cell, 0.0)
-        analytic = out["forces"].detach()
+            out = model.energy_and_forces(positions, species, cell, 0.0)
+            analytic = out["forces"].detach()
 
-        eps = 1e-5
-        for i in range(positions.shape[0]):
-            for d in range(3):
-                pp, pm = positions.clone(), positions.clone()
-                pp[i, d] += eps
-                pm[i, d] -= eps
-                ep = model.compute(pp, species, cell, 0.0)["energy"].item()
-                em = model.compute(pm, species, cell, 0.0)["energy"].item()
-                fd = -(ep - em) / (2 * eps)
-                assert abs(fd - analytic[i, d].item()) < 1e-5
+            eps = 1e-5
+            for i in range(positions.shape[0]):
+                for d in range(3):
+                    pp, pm = positions.clone(), positions.clone()
+                    pp[i, d] += eps
+                    pm[i, d] -= eps
+                    ep = model.compute(pp, species, cell, 0.0)["energy"].item()
+                    em = model.compute(pm, species, cell, 0.0)["energy"].item()
+                    fd = -(ep - em) / (2 * eps)
+                    assert abs(fd - analytic[i, d].item()) < 1e-5
     finally:
         torch.set_default_dtype(torch.float32)
 

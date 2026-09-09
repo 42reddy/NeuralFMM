@@ -1,7 +1,7 @@
 import torch
 
 
-def _n_repeats_for_cutoff(cell: torch.Tensor, cutoff: float) -> tuple[int, int, int]:
+def _n_repeats_for_cutoff(cell, cutoff):
     """Minimum number of periodic images needed along each lattice vector so
     that no atom pair within `cutoff` is missed, via the perpendicular-width
     of the cell along each axis (V / |a_j x a_k|)."""
@@ -15,9 +15,7 @@ def _n_repeats_for_cutoff(cell: torch.Tensor, cutoff: float) -> tuple[int, int, 
     return tuple(int(torch.ceil(cutoff / w).item()) for w in widths)
 
 
-def periodic_neighbor_list(
-    positions: torch.Tensor, cell: torch.Tensor, cutoff: float
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def periodic_neighbor_list(positions, cell, cutoff):
     """Brute-force periodic neighbor list (fine for toy/first-draft system sizes).
 
     Returns:

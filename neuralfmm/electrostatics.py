@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import math
 
 import torch
@@ -7,18 +5,11 @@ import torch
 COULOMB_CONSTANT = 14.399645351950548  # eV * Angstrom / e^2  (1/(4 pi eps0))
 
 
-def _reciprocal_cell(cell: torch.Tensor) -> torch.Tensor:
+def _reciprocal_cell(cell):
     return 2 * math.pi * torch.linalg.inv(cell).T
 
 
-def ewald_matrix(
-    positions: torch.Tensor,
-    cell: torch.Tensor,
-    alpha: float,
-    r_cutoff: float,
-    kmax: int = 6,
-    k_cutoff: float | None = None,
-) -> torch.Tensor:
+def ewald_matrix(positions, cell, alpha, r_cutoff, kmax=6, k_cutoff=None):
     """Dense symmetric (N, N) matrix K such that the periodic point-charge
     Coulomb energy is 0.5 * q^T K q (COULOMB_CONSTANT already folded in).
 
