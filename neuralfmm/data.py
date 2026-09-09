@@ -3,6 +3,8 @@ from pathlib import Path
 
 import torch
 
+from .fmm.octree import build_octree, move_tree_to
+
 # Bulk liquid water, RPBE-D3 (dispersion-corrected DFT), 192 atoms/frame,
 # periodic. See data/README.md for provenance/citation. Source: the
 # data-benchmark/ folder of https://github.com/ChengUCB/les_fit (companion
@@ -31,17 +33,40 @@ class AtomicSystem:
         self.species = species
         self.cell = cell
         self.total_charge = total_charge
+        self._octree_cache = {}  # depth -> Octree, plus (depth, device) -> Octree
 
     def to(self, *args, **kwargs):
-        return AtomicSystem(
+        new = AtomicSystem(
             positions=self.positions.to(*args, **kwargs),
             species=self.species.to(*args, **kwargs),
             cell=self.cell.to(*args, **kwargs),
             total_charge=self.total_charge,
         )
+        new._octree_cache = self._octree_cache
+        return new
 
     def num_atoms(self):
         return self.positions.shape[0]
+
+    def get_octree(self, depth, device=None):
+        """Octree topology (occupied boxes, parent/child + near/far
+        neighbor rows) depends only on `positions`/`cell`, which never
+        change across training epochs for a fixed sample -- so build it
+        once (on CPU, cheaply) and cache it, then cache a per-device copy
+        too, instead of rebuilding it from scratch on every forward pass
+        (build_octree syncs the GPU, drops to numpy, and does per-box
+        Python loops -- expensive to repeat every epoch)."""
+        if depth not in self._octree_cache:
+            self._octree_cache[depth] = build_octree(self.positions, self.cell, depth)
+        tree = self._octree_cache[depth]
+
+        if device is None:
+            return tree
+        device = torch.device(device)
+        device_key = (depth, device)
+        if device_key not in self._octree_cache:
+            self._octree_cache[device_key] = move_tree_to(tree, device)
+        return self._octree_cache[device_key]
 
 
 def ensure_downloaded(url, dest):

@@ -60,13 +60,14 @@ class NeuralFMM4GHDNN(nn.Module):
         self.deep_fmm = DeepNeuralFMM(hidden_dim, fmm_hidden_dim, tree_depth, fmm_blocks, operator_depth)
         self.farfield_head = FarFieldCorrectionHead(fmm_hidden_dim)
 
-    def compute(self, positions, species, cell, total_charge=0.0):
+    def compute(self, positions, species, cell, total_charge=0.0, tree=None):
         s, _v = self.local(positions, species, cell)
         chi, hardness = self.chi_head(species, s)
         e_local = self.energy_head(species, s)
 
         if self.use_neural_fmm:
-            tree = build_octree(positions, cell, self.tree_depth)
+            if tree is None:
+                tree = build_octree(positions, cell, self.tree_depth)
             farfield_latent = self.deep_fmm(s, tree)
             delta_chi, e_far = self.farfield_head(farfield_latent)
             chi = chi + delta_chi
@@ -92,9 +93,9 @@ class NeuralFMM4GHDNN(nn.Module):
             "e_farfield": e_far_total,
         }
 
-    def energy_and_forces(self, positions, species, cell, total_charge=0.0):
+    def energy_and_forces(self, positions, species, cell, total_charge=0.0, tree=None):
         positions = positions.detach().clone().requires_grad_(True)
-        out = self.compute(positions, species, cell, total_charge)
+        out = self.compute(positions, species, cell, total_charge, tree=tree)
         (forces,) = torch.autograd.grad(out["energy"], positions, create_graph=self.training)
         out["forces"] = -forces
         out["positions"] = positions

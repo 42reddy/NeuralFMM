@@ -47,6 +47,31 @@ class Octree:
         return self.levels[self.depth]
 
 
+def _move_level_to(level, device):
+    def _t(t):
+        return t.to(device) if t is not None else None
+
+    return LevelInfo(
+        codes=level.codes,
+        code_to_row=level.code_to_row,
+        positions=_t(level.positions),
+        parent_row=_t(level.parent_row),
+        u_target_row=_t(level.u_target_row),
+        u_source_row=_t(level.u_source_row),
+        leaf_atom_row=_t(level.leaf_atom_row),
+    )
+
+
+def move_tree_to(tree, device):
+    """Copy an already-built Octree's tensors onto `device`, reusing the
+    Python-side bookkeeping (codes, code_to_row) as-is. Cheap relative to
+    `build_octree` -- no numpy rebuild, just a handful of small tensor
+    transfers -- so callers should cache a tree once (e.g. per training
+    sample, whose atomic positions never change across epochs) and move it
+    with this instead of rebuilding from scratch on every forward pass."""
+    return Octree(depth=tree.depth, levels=[_move_level_to(level, device) for level in tree.levels])
+
+
 def _grid_indices(positions, cell, grid_size):
     inv_cell = torch.linalg.inv(cell)
     frac = positions.detach() @ inv_cell

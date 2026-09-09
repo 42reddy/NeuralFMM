@@ -73,7 +73,10 @@ class Trainer:
         device = self.config.device
         cfg = self.config
 
-        total_loss, total_e_mae, total_f_mae, n_samples = 0.0, 0.0, 0.0, 0
+        total_loss = torch.zeros((), device=device)
+        total_e_mae = torch.zeros((), device=device)
+        total_f_mae = torch.zeros((), device=device)
+        n_samples = 0
 
         pbar = tqdm(loader, desc=desc, leave=False, unit="batch", dynamic_ncols=True, mininterval=0.3)
         for batch in pbar:
@@ -81,20 +84,32 @@ class Trainer:
                 self.optimizer.zero_grad()
 
             batch_loss = 0.0
+            batch_e_mae = torch.zeros((), device=device)
+            batch_f_mae = torch.zeros((), device=device)
             for sample in batch:
                 sys_ = sample.system.to(device)
                 energy_true = sample.energy.to(device)
                 forces_true = sample.forces.to(device)
                 n_atoms = sys_.num_atoms()
 
-                out = self.model.energy_and_forces(sys_.positions, sys_.species, sys_.cell, sys_.total_charge)
+                tree = None
+                if self.model.use_neural_fmm:
+                    # Built once on CPU and cached on `sample.system` (which
+                    # outlives this batch/epoch) -- positions never change
+                    # across epochs, so this is a cache hit after epoch 1
+                    # instead of a fresh GPU-sync + Python rebuild every step.
+                    tree = sample.system.get_octree(self.model.tree_depth, device)
+
+                out = self.model.energy_and_forces(
+                    sys_.positions, sys_.species, sys_.cell, sys_.total_charge, tree=tree
+                )
                 e_loss = ((out["energy"] - energy_true) / n_atoms) ** 2
                 f_loss = ((out["forces"] - forces_true) ** 2).mean()
                 loss = cfg.energy_weight * e_loss + cfg.force_weight * f_loss
                 batch_loss = batch_loss + loss
 
-                total_e_mae += (out["energy"] - energy_true).abs().item() / n_atoms
-                total_f_mae += (out["forces"] - forces_true).abs().mean().item()
+                batch_e_mae = batch_e_mae + (out["energy"] - energy_true).abs().detach() / n_atoms
+                batch_f_mae = batch_f_mae + (out["forces"] - forces_true).abs().mean().detach()
                 n_samples += 1
 
             batch_loss = batch_loss / len(batch)
@@ -104,13 +119,18 @@ class Trainer:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.grad_clip)
                 self.optimizer.step()
 
-            total_loss += batch_loss.item() * len(batch)
-            pbar.set_postfix(loss=total_loss / n_samples, f_mae=total_f_mae / n_samples)
+            total_loss += batch_loss.detach() * len(batch)
+            total_e_mae += batch_e_mae
+            total_f_mae += batch_f_mae
+
+            # one sync per batch (not per sample) just to refresh the bar
+            loss_val, f_mae_val = (total_loss / n_samples).item(), (total_f_mae / n_samples).item()
+            pbar.set_postfix(loss=loss_val, f_mae=f_mae_val)
 
         return {
-            "loss": total_loss / n_samples,
-            "energy_mae_per_atom": total_e_mae / n_samples,
-            "force_mae": total_f_mae / n_samples,
+            "loss": (total_loss / n_samples).item(),
+            "energy_mae_per_atom": (total_e_mae / n_samples).item(),
+            "force_mae": (total_f_mae / n_samples).item(),
         }
 
     def fit(self):
