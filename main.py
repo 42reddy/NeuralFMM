@@ -27,7 +27,7 @@ MAX_VAL_SAMPLES = None  # None = use all 50 test structures
 USE_NEURAL_FMM = True
 
 MODEL_HYPERPARAMS = dict(
-    hidden_dim=512,
+    hidden_dim=256,
     local_layers=4,
     n_rbf=8,
     local_r_cut=5.0,
@@ -49,7 +49,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 TRAIN_CONFIG = TrainConfig(
     epochs=20,
-    batch_size=4,
+    batch_size=1,
     lr=1e-3,
     energy_weight=1.0,
     force_weight=100.0,
