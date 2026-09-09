@@ -49,7 +49,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 TRAIN_CONFIG = TrainConfig(
     epochs=20,
-    batch_size=1,
+    batch_size=4,
     lr=1e-3,
     energy_weight=1.0,
     force_weight=100.0,
