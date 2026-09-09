@@ -9,6 +9,18 @@ class Sample:
         self.system = system  # AtomicSystem
         self.energy = energy  # scalar tensor
         self.forces = forces  # (N, 3) tensor
+        self._device_cache = {}  # device -> (energy, forces) already moved there
+
+    def targets_on(self, device):
+        """Like `(self.energy.to(device), self.forces.to(device))`, but
+        memoized -- these labels are fixed for the life of the dataset, so
+        the (synchronous, pageable-memory) H2D transfer only needs to
+        happen once per sample ever. See AtomicSystem.to_cached for why
+        repeating it every batch matters."""
+        device = torch.device(device)
+        if device not in self._device_cache:
+            self._device_cache[device] = (self.energy.to(device), self.forces.to(device))
+        return self._device_cache[device]
 
 
 def build_species_map(symbols):

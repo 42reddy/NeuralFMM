@@ -93,20 +93,31 @@ class Trainer:
             forces_true_list = []
 
             for i, sample in enumerate(batch):
-                sys_ = sample.system.to(device)
+                # `to_cached`/`targets_on` memoize the H2D transfer per
+                # sample (positions/species/cell/energy/forces never change
+                # across epochs) instead of re-copying from pageable host
+                # memory -- a *synchronous*, CPU-blocking copy -- on every
+                # single batch. Same reasoning as the octree/neighbor-graph
+                # caches below: this is what was leaving the GPU idle
+                # between batches while the CPU serially re-transferred
+                # every sample's tensors before the next batched call could
+                # even be issued.
+                sys_ = sample.system.to_cached(device)
+                energy_t, forces_t = sample.targets_on(device)
+
                 positions_list.append(sys_.positions)
                 species_list.append(sys_.species)
                 cell_list.append(sys_.cell)
                 charge_list.append(sys_.total_charge)
                 n_atoms_list.append(sys_.num_atoms())
-                energy_true[i] = sample.energy.to(device)
-                forces_true_list.append(sample.forces.to(device))
+                energy_true[i] = energy_t
+                forces_true_list.append(forces_t)
 
-                # Both caches below are built once on CPU (cheap) and cached
-                # on `sample.system` (which outlives this batch/epoch) --
-                # positions never change across epochs, so these are cache
-                # hits after epoch 1 instead of a fresh GPU-sync + Python/
-                # boolean-mask rebuild on every single forward pass.
+                # Built once on CPU (cheap) and cached on `sample.system`
+                # (which outlives this batch/epoch) -- positions never
+                # change across epochs, so these are cache hits after epoch
+                # 1 instead of a fresh GPU-sync + Python/boolean-mask
+                # rebuild on every single forward pass.
                 local_graphs.append(sample.system.get_neighbor_graph(self.model.local.r_cut, device))
                 if self.model.use_neural_fmm:
                     trees.append(sample.system.get_octree(self.model.tree_depth, device))

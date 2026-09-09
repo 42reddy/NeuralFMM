@@ -36,6 +36,7 @@ class AtomicSystem:
         self.total_charge = total_charge
         self._octree_cache = {}  # depth -> Octree, plus (depth, device) -> Octree
         self._neighbor_cache = {}  # cutoff -> (edge_index, shifts), plus (cutoff, device) -> (edge_index, shifts)
+        self._device_cache = {}  # device -> AtomicSystem (this system's tensors already moved there)
 
     def to(self, *args, **kwargs):
         new = AtomicSystem(
@@ -47,6 +48,20 @@ class AtomicSystem:
         new._octree_cache = self._octree_cache
         new._neighbor_cache = self._neighbor_cache
         return new
+
+    def to_cached(self, device):
+        """Like `.to(device)`, but memoized: positions/species/cell never
+        change across training epochs for a fixed sample, so the H2D
+        transfer only needs to happen once per sample ever, not once per
+        batch/epoch. Plain `.to(device)` copies from ordinary (pageable)
+        CPU memory, which is a *synchronous* copy -- the CPU blocks until
+        it finishes -- so repeating it every batch, for every sample in the
+        batch, serializes a chunk of CPU-blocking work between every pair of
+        GPU-bound batches."""
+        device = torch.device(device)
+        if device not in self._device_cache:
+            self._device_cache[device] = self.to(device)
+        return self._device_cache[device]
 
     def num_atoms(self):
         return self.positions.shape[0]
