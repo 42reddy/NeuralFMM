@@ -75,7 +75,7 @@ class Trainer:
 
         total_loss, total_e_mae, total_f_mae, n_samples = 0.0, 0.0, 0.0, 0
 
-        pbar = tqdm(loader, desc=desc, leave=False, unit="batch")
+        pbar = tqdm(loader, desc=desc, leave=False, unit="batch", dynamic_ncols=True, mininterval=0.3)
         for batch in pbar:
             if train:
                 self.optimizer.zero_grad()
@@ -118,11 +118,9 @@ class Trainer:
         best_val = float("inf")
         best_stats = None
 
-        epoch_bar = tqdm(range(cfg.epochs), desc="epochs", unit="epoch")
-        for epoch in epoch_bar:
+        for epoch in range(cfg.epochs):
             train_stats = self.run_epoch(self.train_loader, train=True, desc=f"epoch {epoch} [train]")
             val_stats = self.run_epoch(self.val_loader, train=False, desc=f"epoch {epoch} [val]")
-            epoch_bar.set_postfix(train_loss=train_stats["loss"], val_loss=val_stats["loss"])
             self.scheduler.step(val_stats["loss"])
 
             if epoch % cfg.log_every == 0 or epoch == cfg.epochs - 1:

@@ -6,6 +6,8 @@ pathway is (or isn't) buying you over the plain 4G-HDNN baseline.
 """
 import json
 
+import torch
+
 from neuralfmm import NeuralFMM4GHDNN
 from neuralfmm.dataset import prepare_water_dataset
 from neuralfmm.evaluation import Evaluator
@@ -25,15 +27,15 @@ MAX_VAL_SAMPLES = None  # None = use all 50 test structures
 USE_NEURAL_FMM = True
 
 MODEL_HYPERPARAMS = dict(
-    hidden_dim=64,
-    local_layers=3,
+    hidden_dim=512,
+    local_layers=4,
     n_rbf=8,
-    local_r_cut=4.0,
+    local_r_cut=5.0,
     use_neural_fmm=USE_NEURAL_FMM,
-    tree_depth=3,
-    fmm_hidden_dim=32,
-    fmm_blocks=2,
-    operator_depth=2,
+    tree_depth=4,
+    fmm_hidden_dim=128,
+    fmm_blocks=4,
+    operator_depth=4,
     ewald_alpha=0.35,
     ewald_r_cutoff=5.5,
     ewald_kmax=4,
@@ -43,6 +45,7 @@ MODEL_HYPERPARAMS = dict(
 # Training
 # ----------------------------------------------------------------------
 CHECKPOINT_DIR = "checkpoints/fmm" if USE_NEURAL_FMM else "checkpoints/local_only"
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 TRAIN_CONFIG = TrainConfig(
     epochs=20,
@@ -53,7 +56,7 @@ TRAIN_CONFIG = TrainConfig(
     grad_clip=10.0,
     log_every=1,
     checkpoint_dir=CHECKPOINT_DIR,
-    device="cpu",
+    device=DEVICE,
     seed=0,
 )
 
@@ -71,6 +74,7 @@ def main():
     )
     print(f"species map: {species_map}")
     print(f"train: {len(train_dataset)} structures, val: {len(val_dataset)} structures")
+    print(f"device: {TRAIN_CONFIG.device}")
 
     model_config = {**MODEL_HYPERPARAMS, "num_species": len(species_map)}
     model = NeuralFMM4GHDNN(**model_config)
