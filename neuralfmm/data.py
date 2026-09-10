@@ -26,14 +26,12 @@ class AtomicSystem:
         embedding table -- map atomic numbers to a contiguous [0, num_species)
         range before constructing this object)
     cell: (3, 3) lattice vectors as rows, a1 = cell[0], a2 = cell[1], a3 = cell[2]
-    total_charge: net charge of the cell enforced as the QEq constraint
     """
 
-    def __init__(self, positions, species, cell, total_charge=0.0):
+    def __init__(self, positions, species, cell):
         self.positions = positions
         self.species = species
         self.cell = cell
-        self.total_charge = total_charge
         self._octree_cache = {}  # depth -> Octree, plus (depth, device) -> Octree
         self._neighbor_cache = {}  # cutoff -> (edge_index, shifts), plus (cutoff, device) -> (edge_index, shifts)
         self._device_cache = {}  # device -> AtomicSystem (this system's tensors already moved there)
@@ -43,7 +41,6 @@ class AtomicSystem:
             positions=self.positions.to(*args, **kwargs),
             species=self.species.to(*args, **kwargs),
             cell=self.cell.to(*args, **kwargs),
-            total_charge=self.total_charge,
         )
         new._octree_cache = self._octree_cache
         new._neighbor_cache = self._neighbor_cache

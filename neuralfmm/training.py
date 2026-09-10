@@ -10,9 +10,6 @@ from .fmm.octree import merge_trees
 
 
 class TrainConfig:
-    """Plain container for training hyperparameters -- pass one of these to
-    Trainer. All values below are just defaults; override with keyword
-    arguments, e.g. TrainConfig(epochs=5, lr=5e-4)."""
 
     def __init__(
         self,
@@ -40,13 +37,7 @@ class TrainConfig:
 
 
 class Trainer:
-    """Per-atom energy MSE + force MSE training loop. A "batch" of
-    structures is concatenated into one block-diagonal graph/tree and run
-    through the model as a single forward+backward call (see
-    `NeuralFMM4GHDNN.compute_batched`/`energy_and_forces_batched`), not
-    looped over one structure at a time -- this dataset has a uniform atom
-    count per structure, which is what makes that batching valid.
-    """
+    """Per atom energy MSE + force MSE training loop."""
 
     def __init__(self, model, model_config, species_map, train_dataset, val_dataset, config):
         torch.manual_seed(config.seed)
@@ -87,44 +78,30 @@ class Trainer:
             if train:
                 self.optimizer.zero_grad()
 
-            positions_list, species_list, cell_list, charge_list = [], [], [], []
+            positions_list, species_list, cell_list = [], [], []
             n_atoms_list, trees, local_graphs = [], [], []
             energy_true = torch.empty(len(batch), device=device)
             forces_true_list = []
 
             for i, sample in enumerate(batch):
-                # `to_cached`/`targets_on` memoize the H2D transfer per
-                # sample (positions/species/cell/energy/forces never change
-                # across epochs) instead of re-copying from pageable host
-                # memory -- a *synchronous*, CPU-blocking copy -- on every
-                # single batch. Same reasoning as the octree/neighbor-graph
-                # caches below: this is what was leaving the GPU idle
-                # between batches while the CPU serially re-transferred
-                # every sample's tensors before the next batched call could
-                # even be issued.
+
                 sys_ = sample.system.to_cached(device)
                 energy_t, forces_t = sample.targets_on(device)
 
                 positions_list.append(sys_.positions)
                 species_list.append(sys_.species)
                 cell_list.append(sys_.cell)
-                charge_list.append(sys_.total_charge)
                 n_atoms_list.append(sys_.num_atoms())
                 energy_true[i] = energy_t
                 forces_true_list.append(forces_t)
 
-                # Built once on CPU (cheap) and cached on `sample.system`
-                # (which outlives this batch/epoch) -- positions never
-                # change across epochs, so these are cache hits after epoch
-                # 1 instead of a fresh GPU-sync + Python/boolean-mask
-                # rebuild on every single forward pass.
                 local_graphs.append(sample.system.get_neighbor_graph(self.model.local.r_cut, device))
                 if self.model.use_neural_fmm:
                     trees.append(sample.system.get_octree(self.model.tree_depth, device))
 
             tree = merge_trees(trees) if trees else None
             out = self.model.energy_and_forces_batched(
-                positions_list, species_list, cell_list, charge_list, tree=tree, local_graphs=local_graphs
+                positions_list, species_list, cell_list, tree=tree, local_graphs=local_graphs
             )
 
             n_atoms = torch.tensor(n_atoms_list, device=device, dtype=out["energy"].dtype)

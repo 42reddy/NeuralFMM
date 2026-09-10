@@ -82,7 +82,7 @@ class PaiNNUpdate(nn.Module):
 
 class PaiNN(nn.Module):
     """Local equivariant backbone providing the invariant per-atom scalar
-    descriptor used by the 4G-HDNN-style local electronegativity/energy heads.
+    descriptor used by the local latent-charge/energy heads.
     """
 
     def __init__(self, num_species, hidden_dim=64, n_layers=3, n_rbf=16, r_cut=5.0):

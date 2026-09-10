@@ -34,7 +34,7 @@ def build_species_map(symbols):
     return {s: i for i, s in enumerate(unique)}
 
 
-def load_extxyz(path, species_map=None, total_charge=0.0, max_samples=None):
+def load_extxyz(path, species_map=None, max_samples=None):
     """Load an extxyz trajectory (ASE-readable) with per-frame `energy` and
     per-atom `forces` into a list of Samples. If `species_map` is None, one
     is built from every symbol seen in the file (pass the training set's map
@@ -58,7 +58,7 @@ def load_extxyz(path, species_map=None, total_charge=0.0, max_samples=None):
         energy = torch.tensor(atoms.get_potential_energy(), dtype=torch.float32)
         forces = torch.tensor(atoms.get_forces(), dtype=torch.float32)
 
-        system = AtomicSystem(positions=positions, species=species, cell=cell, total_charge=total_charge)
+        system = AtomicSystem(positions=positions, species=species, cell=cell)
         samples.append(Sample(system=system, energy=energy, forces=forces))
 
     return samples, species_map
@@ -82,15 +82,13 @@ def list_collate(batch):
     return batch
 
 
-def prepare_water_dataset(data_dir="data", total_charge=0.0, max_train_samples=None, max_val_samples=None):
+def prepare_water_dataset(data_dir="data", max_train_samples=None, max_val_samples=None):
     """End-to-end: download the bundled bulk-water RPBE-D3 benchmark (if not
     already cached in `data_dir`), parse it, and return ready-to-train torch
     Datasets plus the species map used to build them."""
     train_path, test_path = download_water_dataset(data_dir)
 
-    train_samples, species_map = load_extxyz(train_path, total_charge=total_charge, max_samples=max_train_samples)
-    val_samples, _ = load_extxyz(
-        test_path, species_map=species_map, total_charge=total_charge, max_samples=max_val_samples
-    )
+    train_samples, species_map = load_extxyz(train_path, max_samples=max_train_samples)
+    val_samples, _ = load_extxyz(test_path, species_map=species_map, max_samples=max_val_samples)
 
     return AtomicDataset(train_samples), AtomicDataset(val_samples), species_map

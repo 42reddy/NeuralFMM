@@ -1,7 +1,6 @@
 """Evaluation metrics that go beyond plain MAE -- MAE alone can look fine
-while the model gets the *shape* of the potential energy surface, the
-*direction* of forces, or the basic chemistry of the predicted charges
-wrong. See Evaluator.evaluate() for the full list.
+while the model gets the *shape* of the potential energy surface or the
+*direction* of forces wrong. See Evaluator.evaluate() for the full list.
 """
 import json
 from pathlib import Path
@@ -9,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from .model import NeuralFMM4GHDNN
+from .model import NeuralFMMLES
 
 
 def load_evaluator_from_checkpoint(checkpoint_dir, checkpoint_name="best.pt", device="cpu"):
@@ -19,7 +18,7 @@ def load_evaluator_from_checkpoint(checkpoint_dir, checkpoint_name="best.pt", de
     checkpoint_dir = Path(checkpoint_dir)
     with open(checkpoint_dir / "config.json") as f:
         cfg = json.load(f)
-    model = NeuralFMM4GHDNN(**cfg["model_config"])
+    model = NeuralFMMLES(**cfg["model_config"])
     ckpt = torch.load(checkpoint_dir / checkpoint_name, map_location=device)
     model.load_state_dict(ckpt["model_state"])
     return Evaluator(model, cfg["species_map"], device=device)
@@ -38,11 +37,11 @@ class Evaluator:
         energies_true, energies_pred = [], []
         forces_true, forces_pred = [], []
         n_atoms_list = []
-        charges_pred, species_all, neutrality_residual = [], [], []
+        latent_charges_pred, species_all = [], []
 
         for sample in samples:
             sys_ = sample.system.to(self.device)
-            out = self.model.energy_and_forces(sys_.positions, sys_.species, sys_.cell, sys_.total_charge)
+            out = self.model.energy_and_forces(sys_.positions, sys_.species, sys_.cell)
 
             energies_true.append(sample.energy.item())
             energies_pred.append(out["energy"].item())
@@ -50,10 +49,8 @@ class Evaluator:
             forces_pred.append(out["forces"].detach().cpu().numpy())
             n_atoms_list.append(sys_.num_atoms())
 
-            q = out["charges"].detach().cpu().numpy()
-            charges_pred.append(q)
+            latent_charges_pred.append(out["latent_charges"].detach().cpu().numpy())
             species_all.append(sys_.species.cpu().numpy())
-            neutrality_residual.append(q.sum())
 
         return {
             "energies_true": np.array(energies_true),
@@ -61,9 +58,8 @@ class Evaluator:
             "forces_true": forces_true,
             "forces_pred": forces_pred,
             "n_atoms": np.array(n_atoms_list),
-            "charges_pred": charges_pred,
+            "latent_charges_pred": latent_charges_pred,
             "species": species_all,
-            "neutrality_residual": np.array(neutrality_residual),
         }
 
     # ---- metrics ----
@@ -109,10 +105,15 @@ class Evaluator:
         rho, _ = spearmanr(pred["energies_true"], pred["energies_pred"])
         return {"energy_spearman_rho": float(rho)}
 
-    def charge_chemistry_metrics(self, pred):
+    def latent_charge_metrics(self, pred):
+        """Per-species, per-channel mean/std of the predicted latent
+        charges -- purely descriptive (there is no physical charge or
+        neutrality constraint to check now that QEq is gone), included so a
+        channel that has collapsed to ~0 for every species (dead/unused)
+        is easy to spot."""
         inv_map = {v: k for k, v in self.species_map.items()}
         all_species = np.concatenate(pred["species"])
-        all_charges = np.concatenate(pred["charges_pred"])
+        all_latents = np.concatenate(pred["latent_charges_pred"])  # (total_atoms, n_latent)
 
         per_species = {}
         for sid, symbol in inv_map.items():
@@ -120,15 +121,11 @@ class Evaluator:
             if mask.sum() == 0:
                 continue
             per_species[symbol] = {
-                "mean_charge": float(all_charges[mask].mean()),
-                "std_charge": float(all_charges[mask].std()),
+                "mean_per_channel": all_latents[mask].mean(axis=0).tolist(),
+                "std_per_channel": all_latents[mask].std(axis=0).tolist(),
             }
 
-        return {
-            "per_species_charge": per_species,
-            "neutrality_residual_max_abs": float(np.max(np.abs(pred["neutrality_residual"]))),
-            "neutrality_residual_mean_abs": float(np.mean(np.abs(pred["neutrality_residual"]))),
-        }
+        return {"per_species_latent_charge": per_species}
 
     def force_energy_consistency_check(self, samples, n_checks=5, eps=1e-4, seed=0):
         """Confirms autograd forces really are -dE/dR for this trained
@@ -139,14 +136,14 @@ class Evaluator:
         errors = []
         for sample in samples[:n_checks]:
             sys_ = sample.system.to(self.device)
-            out = self.model.energy_and_forces(sys_.positions, sys_.species, sys_.cell, sys_.total_charge)
+            out = self.model.energy_and_forces(sys_.positions, sys_.species, sys_.cell)
             direction = torch.tensor(rng.normal(size=sys_.positions.shape), dtype=sys_.positions.dtype)
             direction = direction / direction.norm()
 
             predicted_de = -(out["forces"].detach() * direction).sum().item() * eps
             e0 = out["energy"].item()
             pos_step = sys_.positions.detach() + eps * direction
-            e1 = self.model.compute(pos_step, sys_.species, sys_.cell, sys_.total_charge)["energy"].item()
+            e1 = self.model.compute(pos_step, sys_.species, sys_.cell)["energy"].item()
             actual_de = e1 - e0
             errors.append(abs(actual_de - predicted_de))
         return {
@@ -187,7 +184,7 @@ class Evaluator:
         pos_b_local, spec_b = cluster(cluster_b_species, np.array([0.0, 0.0, 0.0]), 0.4, seed=2)
 
         def energy_of(positions, species):
-            return self.model.compute(positions, species, cell, total_charge=0.0)["energy"].item()
+            return self.model.compute(positions, species, cell)["energy"].item()
 
         e_a = energy_of(pos_a, spec_a)
         far_offset = np.array([box - 2.0, box / 2, box / 2])
@@ -213,7 +210,7 @@ class Evaluator:
         report.update(self.energy_metrics(pred))
         report.update(self.force_metrics(pred))
         report.update(self.energy_ranking_metrics(pred))
-        report.update(self.charge_chemistry_metrics(pred))
+        report.update(self.latent_charge_metrics(pred))
         report.update(self.force_energy_consistency_check(samples))
 
         if decay_test:

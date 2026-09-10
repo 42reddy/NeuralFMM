@@ -1,4 +1,4 @@
-from .model import NeuralFMM4GHDNN
+from .model import NeuralFMMLES
 from .data import AtomicSystem
 
-__all__ = ["NeuralFMM4GHDNN", "AtomicSystem"]
+__all__ = ["NeuralFMMLES", "AtomicSystem"]
