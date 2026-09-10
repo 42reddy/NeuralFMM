@@ -137,7 +137,9 @@ class Evaluator:
         for sample in samples[:n_checks]:
             sys_ = sample.system.to(self.device)
             out = self.model.energy_and_forces(sys_.positions, sys_.species, sys_.cell)
-            direction = torch.tensor(rng.normal(size=sys_.positions.shape), dtype=sys_.positions.dtype)
+            direction = torch.tensor(
+                rng.normal(size=sys_.positions.shape), dtype=sys_.positions.dtype, device=sys_.positions.device
+            )
             direction = direction / direction.norm()
 
             predicted_de = -(out["forces"].detach() * direction).sum().item() * eps
@@ -162,11 +164,13 @@ class Evaluator:
         checkpoint.
         """
 
+        device = self.device
+
         def cluster(species_ids, center, spread, seed):
             rng = np.random.default_rng(seed)
             offsets = rng.normal(scale=spread, size=(len(species_ids), 3))
-            positions = torch.tensor(center + offsets, dtype=torch.float32)
-            species = torch.tensor(species_ids, dtype=torch.long)
+            positions = torch.tensor(center + offsets, dtype=torch.float32, device=device)
+            species = torch.tensor(species_ids, dtype=torch.long, device=device)
             return positions, species
 
         species_ids = list(self.species_map.values())
@@ -178,7 +182,7 @@ class Evaluator:
         # cluster doesn't itself sit within interaction range of the other
         # and confound the decay curve we're trying to measure
         box = 2.5 * max_separation + 10.0
-        cell = torch.eye(3) * box
+        cell = torch.eye(3, device=device) * box
 
         pos_a, spec_a = cluster(cluster_a_species, np.array([2.0, box / 2, box / 2]), 0.4, seed=1)
         pos_b_local, spec_b = cluster(cluster_b_species, np.array([0.0, 0.0, 0.0]), 0.4, seed=2)
@@ -187,14 +191,14 @@ class Evaluator:
             return self.model.compute(positions, species, cell)["energy"].item()
 
         e_a = energy_of(pos_a, spec_a)
-        far_offset = np.array([box - 2.0, box / 2, box / 2])
-        e_b = energy_of(pos_b_local + torch.tensor(far_offset, dtype=torch.float32), spec_b)
+        far_offset = torch.tensor([box - 2.0, box / 2, box / 2], dtype=torch.float32, device=device)
+        e_b = energy_of(pos_b_local + far_offset, spec_b)
 
         results = []
         combined_species = torch.cat([spec_a, spec_b])
         for r in np.linspace(3.0, max_separation, n_steps):
-            offset = np.array([2.0 + r, box / 2, box / 2])
-            pos_b = pos_b_local + torch.tensor(offset, dtype=torch.float32)
+            offset = torch.tensor([2.0 + r, box / 2, box / 2], dtype=torch.float32, device=device)
+            pos_b = pos_b_local + offset
             combined_pos = torch.cat([pos_a, pos_b], dim=0)
             e_ab = energy_of(combined_pos, combined_species)
             results.append((float(r), e_ab - e_a - e_b))
