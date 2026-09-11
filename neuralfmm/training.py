@@ -18,6 +18,7 @@ class TrainConfig:
         epochs=20,
         batch_size=4,
         lr=1e-3,
+        min_lr=1e-5,
         energy_weight=1.0,
         force_weight=100.0,
         grad_clip=10.0,
@@ -29,6 +30,7 @@ class TrainConfig:
         self.epochs = epochs
         self.batch_size = batch_size
         self.lr = lr
+        self.min_lr = min_lr
         self.energy_weight = energy_weight
         self.force_weight = force_weight
         self.grad_clip = grad_clip
@@ -56,8 +58,8 @@ class Trainer:
         )
 
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=config.lr)
-        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode="min", factor=0.5, patience=3
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer, T_max=config.epochs, eta_min=config.min_lr
         )
 
         if isinstance(model, NeuralFMM):
@@ -156,11 +158,12 @@ class Trainer:
         for epoch in range(cfg.epochs):
             train_stats = self.run_epoch(self.train_loader, train=True, desc=f"epoch {epoch} [train]")
             val_stats = self.run_epoch(self.val_loader, train=False, desc=f"epoch {epoch} [val]")
-            self.scheduler.step(val_stats["loss"])
+            lr = self.optimizer.param_groups[0]["lr"]
+            self.scheduler.step()
 
             if epoch % cfg.log_every == 0 or epoch == cfg.epochs - 1:
                 print(
-                    f"epoch {epoch:3d} "
+                    f"epoch {epoch:3d} lr {lr:.2e} "
                     f"train loss {train_stats['loss']:.4f} E_MAE/atom {train_stats['energy_mae_per_atom']:.4f} "
                     f"F_MAE {train_stats['force_mae']:.4f} | "
                     f"val loss {val_stats['loss']:.4f} E_MAE/atom {val_stats['energy_mae_per_atom']:.4f} "

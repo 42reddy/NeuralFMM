@@ -4,7 +4,7 @@ from ..base import BaseAtomisticModel
 from ..local.encoder import EquivariantEncoder
 from ..local.heads import LocalEnergyHead
 from .heads import LRFieldEnergyHead
-from .octree import build_octree, merge_trees
+from .octree import atom_box_delta, build_octree, merge_trees
 from .operators import NeuralFMMTree
 
 
@@ -79,7 +79,9 @@ class NeuralFMM(BaseAtomisticModel):
 
         if tree is None:
             tree = build_octree(positions, cell, self.tree_depth)
-        farfield_feat = self.tree_module(h_i, tree)
+        leaf = tree.leaf()
+        atom_delta = atom_box_delta(positions, cell, leaf.centers[leaf.leaf_atom_row])
+        farfield_feat = self.tree_module(h_i, atom_delta, tree)
         e_long = self.farfield_head(farfield_feat).sum()
 
         e_local_total = e_local.sum()
@@ -118,7 +120,11 @@ class NeuralFMM(BaseAtomisticModel):
 
         if tree is None:
             tree = merge_trees([build_octree(p, c, self.tree_depth) for p, c in zip(positions_list, cell_list)])
-        farfield_feat = self.tree_module(h_i, tree)
+        leaf = tree.leaf()
+        cell_stacked = torch.stack(cell_list, dim=0)
+        cell_per_atom = cell_stacked[batch_idx]  # (B*N, 3, 3) -- each atom's own structure's cell
+        atom_delta = atom_box_delta(flat_positions, cell_per_atom, leaf.centers[leaf.leaf_atom_row])
+        farfield_feat = self.tree_module(h_i, atom_delta, tree)
         e_far = self.farfield_head(farfield_feat)  # (B*N,)
         e_long_total = torch.zeros(b, device=flat_positions.device, dtype=flat_positions.dtype)
         e_long_total.index_add_(0, batch_idx, e_far)
