@@ -1,14 +1,14 @@
 {
-  "model_class": "fmm",
+  "model_class": "les",
   "model_config": {
     "hidden_dim": 256,
     "local_layers": 4,
     "n_rbf": 8,
     "local_r_cut": 5.0,
-    "tree_depth": 3,
-    "fmm_hidden_dim": 128,
-    "fmm_blocks": 6,
-    "operator_depth": 4,
+    "n_latent": 8,
+    "ewald_alpha": 0.35,
+    "ewald_alpha_min_ratio": 0.1,
+    "ewald_kmax": 4,
     "num_species": 2
   },
   "species_map": {

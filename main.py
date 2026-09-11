@@ -26,7 +26,7 @@ MAX_VAL_SAMPLES = None  # None = use all 50 test structures
 # ----------------------------------------------------------------------
 # Model
 # ----------------------------------------------------------------------
-ARCHITECTURE = "fmm"  # "fmm" or "les"
+ARCHITECTURE = "les"  # "fmm" or "les"
 
 SHARED_HYPERPARAMS = dict(
     hidden_dim=256,
@@ -88,6 +88,8 @@ def main():
 
     model_config = {**SHARED_HYPERPARAMS, **ARCHITECTURE_HYPERPARAMS[ARCHITECTURE], "num_species": len(species_map)}
     model = MODEL_CLASS[ARCHITECTURE](**model_config)
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"n_params: {n_params:,}")
 
     trainer = Trainer(
         model=model,

@@ -36,6 +36,8 @@ class LESModel(BaseAtomisticModel):
         ewald_alpha=0.3,
         ewald_alpha_min_ratio=0.1,
         ewald_kmax=6,
+        latent_hidden_dim=128,
+        latent_depth=4,
     ):
         super().__init__()
         self.n_latent = n_latent
@@ -44,7 +46,7 @@ class LESModel(BaseAtomisticModel):
         self.ewald_kmax = ewald_kmax
 
         self.local = EquivariantEncoder(num_species, hidden_dim, local_layers, n_rbf, local_r_cut)
-        self.latent_head = LatentChargeHead(num_species, hidden_dim, n_latent)
+        self.latent_head = LatentChargeHead(num_species, hidden_dim, n_latent, latent_hidden_dim, latent_depth)
         self.energy_head = LocalEnergyHead(num_species, hidden_dim)
 
         # One learnable range parameter per latent channel, bounded to
