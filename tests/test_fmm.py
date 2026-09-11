@@ -30,7 +30,8 @@ def test_forward_shapes():
     model = _make_model()
     out = model.compute(positions, species, cell)
     assert out["energy"].shape == ()
-    assert out["atomic_features"].shape == (positions.shape[0], model.local.hidden_dim)
+    assert out["atomic_features"].shape == (positions.shape[0], model.local.hidden_dim + model.n_latent)
+    assert out["latent_charges"].shape == (positions.shape[0], model.n_latent)
 
 
 def test_forces_match_finite_differences():
