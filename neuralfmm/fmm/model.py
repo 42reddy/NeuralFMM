@@ -61,6 +61,7 @@ class NeuralFMM(BaseAtomisticModel):
         fmm_hidden_dim=64,
         fmm_blocks=3,
         operator_depth=2,
+        fmm_n_rbf=16,
     ):
         super().__init__()
         self.needs_tree = True
@@ -69,7 +70,9 @@ class NeuralFMM(BaseAtomisticModel):
         self.local = EquivariantEncoder(num_species, hidden_dim, local_layers, n_rbf, local_r_cut)
         self.energy_head = LocalEnergyHead(num_species, hidden_dim)
 
-        self.tree_module = NeuralFMMTree(hidden_dim, fmm_hidden_dim, tree_depth, fmm_blocks, operator_depth)
+        self.tree_module = NeuralFMMTree(
+            hidden_dim, fmm_hidden_dim, tree_depth, fmm_blocks, operator_depth, fmm_n_rbf
+        )
         self.farfield_head = LRFieldEnergyHead(fmm_hidden_dim)
 
     def compute(self, positions, species, cell, tree=None):

@@ -45,10 +45,20 @@ class LevelInfo:
         each (target, source) pair above, periodic-minimum-image wrapped
         (far-field pairs can straddle the periodic boundary)
     leaf_atom_row: (N,) only set at the leaf level
+    box_scale: (n_boxes,) this level's own box-diagonal length (Cartesian),
+        the same value repeated for every box at this level of a given
+        structure -- a per-box tensor (rather than one scalar) purely so
+        `merge_trees` can concatenate it like every other per-box field when
+        batched structures don't all share the same cell. Used as the `r_cut`
+        length scale for the RBF/envelope featurization of `delta_to_parent`/
+        `delta_far`/the live atom-to-box delta (see `fmm.operators`) -- not
+        a claim that this is exactly the max separation those vectors reach,
+        just a natural, cheaply-available scale for it.
     """
 
     def __init__(self, codes, code_to_row, centers, parent_row=None, delta_to_parent=None,
-                 u_target_row=None, u_source_row=None, delta_far=None, leaf_atom_row=None):
+                 u_target_row=None, u_source_row=None, delta_far=None, leaf_atom_row=None,
+                 box_scale=None):
         self.codes = codes
         self.code_to_row = code_to_row
         self.centers = centers
@@ -58,6 +68,7 @@ class LevelInfo:
         self.u_source_row = u_source_row
         self.delta_far = delta_far
         self.leaf_atom_row = leaf_atom_row
+        self.box_scale = box_scale
 
 
 class Octree:
@@ -83,6 +94,7 @@ def _move_level_to(level, device):
         u_source_row=_t(level.u_source_row),
         delta_far=_t(level.delta_far),
         leaf_atom_row=_t(level.leaf_atom_row),
+        box_scale=_t(level.box_scale),
     )
 
 
@@ -187,7 +199,14 @@ def build_octree(positions, cell, depth):
         frac_center = torch.as_tensor(frac_center_np, device=positions.device, dtype=positions.dtype)
         cart_center = frac_center @ cell
 
-        info = LevelInfo(codes=uniq_codes, code_to_row=code_to_row, centers=cart_center)
+        # natural length scale for this level: the Cartesian diagonal of one
+        # box at this grid resolution, broadcast to every box at this level
+        # (see `LevelInfo.box_scale`) -- purely geometric, from `cell`, no
+        # gradient needed.
+        box_diag_frac = torch.full((3,), 1.0 / grid_size, device=positions.device, dtype=positions.dtype)
+        box_scale = (box_diag_frac @ cell).norm().expand(cart_center.shape[0])
+
+        info = LevelInfo(codes=uniq_codes, code_to_row=code_to_row, centers=cart_center, box_scale=box_scale)
 
         if l == depth:
             info.leaf_atom_row = torch.as_tensor(inverse, device=positions.device, dtype=torch.long)
@@ -287,6 +306,7 @@ def merge_trees(trees):
     per_level_u_target = [[] for _ in range(n_levels)]
     per_level_u_source = [[] for _ in range(n_levels)]
     per_level_delta_far = [[] for _ in range(n_levels)]
+    per_level_box_scale = [[] for _ in range(n_levels)]
     leaf_atom_rows = []
 
     for tree in trees:
@@ -303,6 +323,7 @@ def merge_trees(trees):
 
             per_level_centers[l].append(level.centers)
             per_level_codes[l].append(level.codes)
+            per_level_box_scale[l].append(level.box_scale)
 
             if level.parent_row is not None:
                 per_level_parent_row[l].append(level.parent_row + start_offset[l - 1])
@@ -334,6 +355,7 @@ def merge_trees(trees):
                 u_source_row=_cat(per_level_u_source[l]),
                 delta_far=_cat(per_level_delta_far[l]),
                 leaf_atom_row=_cat(leaf_atom_rows) if l == depth else None,
+                box_scale=_cat(per_level_box_scale[l]),
             )
         )
 
