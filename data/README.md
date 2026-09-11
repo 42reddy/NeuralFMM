@@ -21,8 +21,8 @@ data.
   `ARCHITECTURE.md`).
 - **Dispersion-corrected (D3)** — the reference forces/energies actually
   contain dispersion physics, which is exactly the kind of "extra long-range
-  kernel" `use_neural_fmm=True`'s far-field energy channel is meant to learn
-  and a `use_neural_fmm=False` (pure 4G-HDNN local) baseline structurally
+  kernel" `fmm.NeuralFMM`'s far-field energy channel is meant to learn and a
+  fixed-form analytic kernel (`les.LESModel`'s Ewald baseline) structurally
   cannot capture.
 - **Polar/H-bonded** — water's O/H electronegativity contrast gives the QEq
   charge-chemistry eval metric (see `scripts/eval.py`) something meaningful

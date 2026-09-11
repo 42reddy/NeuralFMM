@@ -7,7 +7,7 @@ def apply_rope(x, pos, base=10000.0):
 
     x: (..., F) with F even
     pos: (...,) matching x's leading dims -- here, the Morton code of the box
-        each row belongs to, giving the operators in fmm/blocks.py spatial
+        each row belongs to, giving the operators in fmm/operators.py spatial
         awareness the way the paper's per-level MLPs need (Sec 3.2).
     """
     f = x.shape[-1]

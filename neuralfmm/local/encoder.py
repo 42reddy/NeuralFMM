@@ -80,9 +80,14 @@ class PaiNNUpdate(nn.Module):
         return s + ds, v + dv
 
 
-class PaiNN(nn.Module):
-    """Local equivariant backbone providing the invariant per-atom scalar
-    descriptor used by the local latent-charge/energy heads.
+class EquivariantEncoder(nn.Module):
+    """The shared "LOCAL E(3)-EQUIVARIANT ENCODER" box: a PaiNN backbone
+    (Schutt et al., 2021) producing, per atom, an invariant scalar
+    descriptor `s` and an equivariant vector `v`. Both `les.LESModel` and
+    `fmm.NeuralFMM` instantiate this same class and read off `s` -- LES
+    feeds it to a local energy head plus a latent-charge head, NeuralFMM
+    feeds it to a local energy head plus straight on as the atomic features
+    `h_i` handed to the octree. Nothing here is architecture-specific.
     """
 
     def __init__(self, num_species, hidden_dim=64, n_layers=3, n_rbf=16, r_cut=5.0):

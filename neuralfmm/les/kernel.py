@@ -31,7 +31,7 @@ def smoothed_kernel_matrix(positions, cell, alpha, kmax=6):
     Coulomb, alpha -> small collapses the kernel toward zero range. That is
     what lets different latent channels, each with their own alpha, learn
     genuinely different effective ranges instead of every channel sharing
-    the exact same 1/r decay -- see `neuralfmm.model.NeuralFMMLES` for how
+    the exact same 1/r decay -- see `neuralfmm.les.model.LESModel` for how
     alpha is parameterized per channel and kept bounded so it stays
     consistent with `kmax`'s truncation accuracy.
 

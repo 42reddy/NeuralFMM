@@ -6,7 +6,9 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from .dataset import list_collate
+from .fmm import NeuralFMM
 from .fmm.octree import merge_trees
+from .les import LESModel
 
 
 class TrainConfig:
@@ -58,10 +60,19 @@ class Trainer:
             self.optimizer, mode="min", factor=0.5, patience=3
         )
 
+        if isinstance(model, NeuralFMM):
+            model_class = "fmm"
+        elif isinstance(model, LESModel):
+            model_class = "les"
+        else:
+            raise TypeError(f"unrecognized model type {type(model).__name__}, expected LESModel or NeuralFMM")
+
         self.checkpoint_dir = Path(config.checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         with open(self.checkpoint_dir / "config.json", "w") as f:
-            json.dump({"model_config": model_config, "species_map": species_map}, f, indent=2)
+            json.dump(
+                {"model_class": model_class, "model_config": model_config, "species_map": species_map}, f, indent=2
+            )
 
     def run_epoch(self, loader, train, desc=None):
         self.model.train(train)
@@ -96,7 +107,7 @@ class Trainer:
                 forces_true_list.append(forces_t)
 
                 local_graphs.append(sample.system.get_neighbor_graph(self.model.local.r_cut, device))
-                if self.model.use_neural_fmm:
+                if getattr(self.model, "needs_tree", False):
                     trees.append(sample.system.get_octree(self.model.tree_depth, device))
 
             tree = merge_trees(trees) if trees else None

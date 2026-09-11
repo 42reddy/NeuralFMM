@@ -1,4 +1,5 @@
-from .model import NeuralFMMLES
 from .data import AtomicSystem
+from .fmm import NeuralFMM
+from .les import LESModel
 
-__all__ = ["NeuralFMMLES", "AtomicSystem"]
+__all__ = ["LESModel", "NeuralFMM", "AtomicSystem"]

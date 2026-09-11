@@ -1,17 +1,19 @@
-"""Dataset prep -> model init -> training -> evaluation,
+"""Dataset prep -> model init -> training -> evaluation.
 
-Run this twice -- once with USE_NEURAL_FMM = True, once False -- and compare
+Run this twice -- once with ARCHITECTURE = "fmm", once "les" -- and compare
 the two checkpoint directories' eval reports to see what the hierarchical
-Neural FMM kernel is (or isn't) buying you over the LES baseline's single
-analytic Ewald kernel, both consuming the exact same per-atom latent charges.
+Neural FMM (neuralfmm.fmm.NeuralFMM) is (or isn't) buying you over the LES
+baseline (neuralfmm.les.LESModel), both consuming the same local equivariant
+encoder.
 """
 import json
 
 import torch
 
-from neuralfmm import NeuralFMMLES
 from neuralfmm.dataset import prepare_water_dataset
 from neuralfmm.evaluation import Evaluator
+from neuralfmm.fmm import NeuralFMM
+from neuralfmm.les import LESModel
 from neuralfmm.training import TrainConfig, Trainer
 
 # ----------------------------------------------------------------------
@@ -24,28 +26,36 @@ MAX_VAL_SAMPLES = None  # None = use all 50 test structures
 # ----------------------------------------------------------------------
 # Model
 # ----------------------------------------------------------------------
-USE_NEURAL_FMM = True
+ARCHITECTURE = "fmm"  # "fmm" or "les"
 
-MODEL_HYPERPARAMS = dict(
+SHARED_HYPERPARAMS = dict(
     hidden_dim=256,
     local_layers=4,
     n_rbf=8,
     local_r_cut=5.0,
+)
+
+LES_HYPERPARAMS = dict(
     n_latent=4,
-    use_neural_fmm=USE_NEURAL_FMM,
-    tree_depth=4,
-    fmm_hidden_dim=128,
-    fmm_blocks=4,
-    operator_depth=4,
     ewald_alpha=0.35,
     ewald_alpha_min_ratio=0.1,
     ewald_kmax=4,
 )
 
+FMM_HYPERPARAMS = dict(
+    tree_depth=4,
+    fmm_hidden_dim=128,
+    fmm_blocks=4,
+    operator_depth=4,
+)
+
+MODEL_CLASS = {"les": LESModel, "fmm": NeuralFMM}
+ARCHITECTURE_HYPERPARAMS = {"les": LES_HYPERPARAMS, "fmm": FMM_HYPERPARAMS}
+
 # ----------------------------------------------------------------------
 # Training
 # ----------------------------------------------------------------------
-CHECKPOINT_DIR = "checkpoints/fmm" if USE_NEURAL_FMM else "checkpoints/local_only"
+CHECKPOINT_DIR = f"checkpoints/{ARCHITECTURE}"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 TRAIN_CONFIG = TrainConfig(
@@ -74,9 +84,10 @@ def main():
     print(f"species map: {species_map}")
     print(f"train: {len(train_dataset)} structures, val: {len(val_dataset)} structures")
     print(f"device: {TRAIN_CONFIG.device}")
+    print(f"architecture: {ARCHITECTURE}")
 
-    model_config = {**MODEL_HYPERPARAMS, "num_species": len(species_map)}
-    model = NeuralFMMLES(**model_config)
+    model_config = {**SHARED_HYPERPARAMS, **ARCHITECTURE_HYPERPARAMS[ARCHITECTURE], "num_species": len(species_map)}
+    model = MODEL_CLASS[ARCHITECTURE](**model_config)
 
     trainer = Trainer(
         model=model,
@@ -88,7 +99,7 @@ def main():
     )
     trainer.fit()
 
-    evaluator = Evaluator(model, species_map, device=TRAIN_CONFIG.device)
+    evaluator = Evaluator(model, species_map, device=TRAIN_CONFIG.device, model_class=ARCHITECTURE)
     report = evaluator.evaluate(
         val_dataset.samples,
         decay_test=RUN_DECAY_TEST,

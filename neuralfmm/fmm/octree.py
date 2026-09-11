@@ -97,16 +97,24 @@ def build_octree(positions, cell, depth):
     of `positions` inside `cell`, down to `depth` levels (root = level 0,
     leaves = level `depth`). Only occupied boxes are stored at every level.
 
+    This is the purely geometric half of the pipeline -- identical in spirit
+    to a classical FMM/GROMACS-style tree build: LEAF ASSIGNMENT (which box
+    each atom falls into, below), then, per level, NEAR/FAR CLASSIFICATION
+    and BUILD FAR-FIELD INTERACTION LISTS (the U-list construction below,
+    stored as `u_target_row`/`u_source_row`). None of this is learned --
+    only what flows *through* the resulting boxes (fmm/operators.py) is.
+
     Box-tree bookkeeping (which atom sits in which box, which boxes are
     "near"/"far") is inherently a discontinuous function of the atomic
     positions, so it is built with `positions.detach()` and is NOT part of
     the autograd graph -- forces still flow correctly through every tensor
-    *value* carried on the tree (the local-GNN features that seed the leaves,
-    and every learned M2M/M2L/L2L map), just not through which box an atom
-    is assigned to. See ARCHITECTURE.md for the practical consequence
-    (small force discontinuities as atoms cross box boundaries) and the
-    smooth-partition follow-up noted there.
+    *value* carried on the tree (the local-encoder features that seed the
+    leaves, and every learned P2O/O2O/O2I/I2I map), just not through which
+    box an atom is assigned to. See ARCHITECTURE.md for the practical
+    consequence (small force discontinuities as atoms cross box boundaries)
+    and the smooth-partition follow-up noted there.
     """
+    # ---- LEAF ASSIGNMENT: which box each atom falls into ----
     leaf_idx = _grid_indices(positions, cell, 2 ** depth)  # (N, 3)
     leaf_codes = _interleave_bits(leaf_idx[:, 0], leaf_idx[:, 1], leaf_idx[:, 2], depth)
 
@@ -138,6 +146,7 @@ def build_octree(positions, cell, depth):
         child_codes_prev = uniq_codes
         tree.levels.append(info)
 
+        # ---- NEAR/FAR CLASSIFICATION + BUILD FAR-FIELD INTERACTION LISTS ----
         grid_size = 2 ** l
         if grid_size >= 4:  # far-field only well-defined once >=3 boxes/axis
             targets, sources = [], []
@@ -187,17 +196,17 @@ def merge_trees(trees):
     """Merge same-depth, per-structure Octrees into one block-diagonal
     Octree spanning a whole training batch.
 
-    NeuralFMMBlock (fmm/blocks.py) only ever touches a tree through flat
+    FMMBlock (fmm/operators.py) only ever touches a tree through flat
     per-level row indices (parent_row, u_target_row, u_source_row,
     leaf_atom_row) fed to index_add_/gather -- it never assumes those rows
     all come from a single structure. So concatenating N structures' level-l
     tensors and shifting structure i's row indices by the running box count
-    from structures 0..i-1 gives one tree that NeuralFMMBlock.forward
+    from structures 0..i-1 gives one tree that FMMBlock.forward
     runs through completely unchanged, in a single batched pass, while every
-    M2M/M2L/L2L gather-scatter still only ever mixes boxes/atoms belonging
+    O2O/O2I/I2I gather-scatter still only ever mixes boxes/atoms belonging
     to the same original structure (no cross-structure edges are added).
 
-    This is what lets DeepNeuralFMM run once per training batch instead of
+    This is what lets NeuralFMMTree run once per training batch instead of
     once per structure.
     """
     depth = trees[0].depth
@@ -248,7 +257,7 @@ def merge_trees(trees):
         merged_levels.append(
             LevelInfo(
                 codes=np.concatenate(per_level_codes[l]),
-                code_to_row=None,  # only needed while building, not by NeuralFMMBlock
+                code_to_row=None,  # only needed while building, not by FMMBlock
                 positions=_cat(per_level_positions[l]),
                 parent_row=_cat(per_level_parent_row[l]),
                 u_target_row=_cat(per_level_u_target[l]),

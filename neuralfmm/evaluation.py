@@ -8,28 +8,44 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from .model import NeuralFMMLES
+from .fmm import NeuralFMM
+from .les import LESModel
+
+MODEL_REGISTRY = {"les": LESModel, "fmm": NeuralFMM}
+
+# per-model-class name of the per-atom auxiliary array `compute()` returns,
+# alongside "energy"/"e_local"/"e_long_range" -- LES has no atomic-feature
+# vector to report and NeuralFMM has no latent charges (see fmm.model.NeuralFMM's
+# docstring: "Charge prediction: none required"), so each model exposes
+# exactly one of these two keys.
+AUX_PRED_KEY = {"les": "latent_charges", "fmm": "atomic_features"}
 
 
 def load_evaluator_from_checkpoint(checkpoint_dir, checkpoint_name="best.pt", device="cpu"):
     """Rebuild a model from a checkpoint saved by Trainer and wrap it in an
-    Evaluator. checkpoint_dir must contain config.json (model_config +
-    species_map, written by Trainer) and the checkpoint file itself."""
+    Evaluator. checkpoint_dir must contain config.json (model_class,
+    model_config, species_map, written by Trainer) and the checkpoint file
+    itself."""
     checkpoint_dir = Path(checkpoint_dir)
     with open(checkpoint_dir / "config.json") as f:
         cfg = json.load(f)
-    model = NeuralFMMLES(**cfg["model_config"])
+    model_cls = MODEL_REGISTRY[cfg["model_class"]]
+    model = model_cls(**cfg["model_config"])
     ckpt = torch.load(checkpoint_dir / checkpoint_name, map_location=device)
     model.load_state_dict(ckpt["model_state"])
-    return Evaluator(model, cfg["species_map"], device=device)
+    return Evaluator(model, cfg["species_map"], device=device, model_class=cfg["model_class"])
 
 
 class Evaluator:
-    def __init__(self, model, species_map, device="cpu"):
+    def __init__(self, model, species_map, device="cpu", model_class=None):
         self.model = model.to(device)
         self.model.eval()
         self.species_map = species_map
         self.device = device
+        if model_class is None:
+            model_class = "fmm" if isinstance(model, NeuralFMM) else "les"
+        self.model_class = model_class
+        self.aux_pred_key = AUX_PRED_KEY[model_class]
 
     # ---- prediction collection ----
 
@@ -37,7 +53,7 @@ class Evaluator:
         energies_true, energies_pred = [], []
         forces_true, forces_pred = [], []
         n_atoms_list = []
-        latent_charges_pred, species_all = [], []
+        aux_pred, species_all = [], []
 
         for sample in samples:
             sys_ = sample.system.to(self.device)
@@ -49,7 +65,7 @@ class Evaluator:
             forces_pred.append(out["forces"].detach().cpu().numpy())
             n_atoms_list.append(sys_.num_atoms())
 
-            latent_charges_pred.append(out["latent_charges"].detach().cpu().numpy())
+            aux_pred.append(out[self.aux_pred_key].detach().cpu().numpy())
             species_all.append(sys_.species.cpu().numpy())
 
         return {
@@ -58,7 +74,7 @@ class Evaluator:
             "forces_true": forces_true,
             "forces_pred": forces_pred,
             "n_atoms": np.array(n_atoms_list),
-            "latent_charges_pred": latent_charges_pred,
+            "aux_pred": aux_pred,
             "species": species_all,
         }
 
@@ -105,15 +121,19 @@ class Evaluator:
         rho, _ = spearmanr(pred["energies_true"], pred["energies_pred"])
         return {"energy_spearman_rho": float(rho)}
 
-    def latent_charge_metrics(self, pred):
-        """Per-species, per-channel mean/std of the predicted latent
-        charges -- purely descriptive (there is no physical charge or
-        neutrality constraint to check now that QEq is gone), included so a
-        channel that has collapsed to ~0 for every species (dead/unused)
-        is easy to spot."""
+    def aux_pred_metrics(self, pred):
+        """Per-species, per-channel mean/std of the model's per-atom
+        auxiliary array -- for LES, the latent "charges" (no physical charge
+        or neutrality constraint to check, QEq is gone entirely); for
+        NeuralFMM, the atomic features h_i handed to the octree (there is no
+        charge concept in that architecture at all). Purely descriptive,
+        included so a channel that has collapsed to ~0 for every species
+        (dead/unused) is easy to spot. Report key is named after whichever
+        aux array this model produces so LES/FMM reports stay visually
+        distinct."""
         inv_map = {v: k for k, v in self.species_map.items()}
         all_species = np.concatenate(pred["species"])
-        all_latents = np.concatenate(pred["latent_charges_pred"])  # (total_atoms, n_latent)
+        all_aux = np.concatenate(pred["aux_pred"])  # (total_atoms, C)
 
         per_species = {}
         for sid, symbol in inv_map.items():
@@ -121,11 +141,11 @@ class Evaluator:
             if mask.sum() == 0:
                 continue
             per_species[symbol] = {
-                "mean_per_channel": all_latents[mask].mean(axis=0).tolist(),
-                "std_per_channel": all_latents[mask].std(axis=0).tolist(),
+                "mean_per_channel": all_aux[mask].mean(axis=0).tolist(),
+                "std_per_channel": all_aux[mask].std(axis=0).tolist(),
             }
 
-        return {"per_species_latent_charge": per_species}
+        return {f"per_species_{self.aux_pred_key}": per_species}
 
     def force_energy_consistency_check(self, samples, n_checks=5, eps=1e-4, seed=0):
         """Confirms autograd forces really are -dE/dR for this trained
@@ -160,8 +180,8 @@ class Evaluator:
         alone) as a function of separation R. Uses no dataset labels --
         directly probes whether the far-field pathway behaves sensibly
         (decays with distance rather than blowing up or staying flat), and
-        is the metric to compare between a use_neural_fmm=False and =True
-        checkpoint.
+        is the metric to compare between an `les.LESModel` and an
+        `fmm.NeuralFMM` checkpoint.
         """
 
         device = self.device
@@ -214,7 +234,7 @@ class Evaluator:
         report.update(self.energy_metrics(pred))
         report.update(self.force_metrics(pred))
         report.update(self.energy_ranking_metrics(pred))
-        report.update(self.latent_charge_metrics(pred))
+        report.update(self.aux_pred_metrics(pred))
         report.update(self.force_energy_consistency_check(samples))
 
         if decay_test:
