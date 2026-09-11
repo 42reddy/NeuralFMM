@@ -6,16 +6,22 @@ import torch
 from .fmm.octree import build_octree, move_tree_to
 from .local.neighbors import periodic_neighbor_list
 
-# Bulk liquid water, RPBE-D3 (dispersion-corrected DFT), 192 atoms/frame,
-# periodic. See data/README.md for provenance/citation. Source: the
-# data-benchmark/ folder of https://github.com/ChengUCB/les_fit (companion
-# data to Cheng, npj Comput. Mater. 11, 80 (2025), arXiv:2408.15165).
-WATER_TRAIN_URL = (
-    "https://raw.githubusercontent.com/ChengUCB/les_fit/main/data-benchmark/train-H2O_RPBE-D3.xyz"
+# Bulk liquid water, revPBE0-D3 (hybrid-functional DFT), 192 atoms/frame
+# (64 H2O), periodic, 1593 configurations. Source: the training-set/ folder
+# of https://github.com/BingqingCheng/ab-initio-thermodynamics-of-water
+# (companion data to Cheng, Engel, Behler, Dellago & Ceriotti, PNAS 116,
+# 1110 (2019), arXiv:1811.08630). No train/test split is provided upstream,
+# so `download_water_dataset` carves one out itself (see
+# `_split_water_dataset`) and caches both halves alongside the raw download.
+WATER_DATASET_URL = (
+    "https://raw.githubusercontent.com/BingqingCheng/ab-initio-thermodynamics-of-water"
+    "/master/training-set/dataset_1593.xyz"
 )
-WATER_TEST_URL = (
-    "https://raw.githubusercontent.com/ChengUCB/les_fit/main/data-benchmark/test-H2O_RPBE-D3.xyz"
-)
+# Every WATER_TEST_STRIDE-th configuration (in trajectory order) is held out
+# as the test set; the rest is training data. Striding rather than a
+# contiguous tail split spreads the held-out frames across the whole
+# trajectory, avoiding a test set drawn from a single correlated MD window.
+WATER_TEST_STRIDE = 10
 
 
 class AtomicSystem:
@@ -137,11 +143,30 @@ def ensure_downloaded(url, dest):
     return dest
 
 
+def _split_water_dataset(raw_path, train_path, test_path, test_stride=WATER_TEST_STRIDE):
+    """Split the single upstream trajectory file into cached train/test
+    extxyz files, taking every `test_stride`-th frame as test. Skipped if
+    both outputs already exist."""
+    import ase.io
+
+    if train_path.exists() and test_path.exists():
+        return
+    frames = ase.io.read(str(raw_path), index=":")
+    test_frames = frames[::test_stride]
+    test_ids = set(range(0, len(frames), test_stride))
+    train_frames = [atoms for i, atoms in enumerate(frames) if i not in test_ids]
+    ase.io.write(str(train_path), train_frames, format="extxyz")
+    ase.io.write(str(test_path), test_frames, format="extxyz")
+
+
 def download_water_dataset(data_dir="data"):
-    """Fetch the bundled bulk-water RPBE-D3 benchmark into `data_dir`,
+    """Fetch the bundled bulk-water revPBE0-D3 benchmark into `data_dir`,
     returning (train_path, test_path). Safe to call every run -- it only
-    hits the network the first time."""
+    hits the network the first time, and the train/test split is cached
+    alongside the raw download so it's only computed once too."""
     data_dir = Path(data_dir)
-    train_path = ensure_downloaded(WATER_TRAIN_URL, data_dir / "train-H2O_RPBE-D3.xyz")
-    test_path = ensure_downloaded(WATER_TEST_URL, data_dir / "test-H2O_RPBE-D3.xyz")
+    raw_path = ensure_downloaded(WATER_DATASET_URL, data_dir / "dataset_1593.xyz")
+    train_path = data_dir / "train-H2O_revPBE0-D3.xyz"
+    test_path = data_dir / "test-H2O_revPBE0-D3.xyz"
+    _split_water_dataset(raw_path, train_path, test_path)
     return train_path, test_path

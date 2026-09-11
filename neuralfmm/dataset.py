@@ -55,8 +55,16 @@ def load_extxyz(path, species_map=None, max_samples=None):
         species = torch.tensor([species_map[s] for s in symbols], dtype=torch.long)
         positions = torch.tensor(atoms.get_positions(), dtype=torch.float32)
         cell = torch.tensor(atoms.cell.array, dtype=torch.float32)
-        energy = torch.tensor(atoms.get_potential_energy(), dtype=torch.float32)
-        forces = torch.tensor(atoms.get_forces(), dtype=torch.float32)
+        # Prefer an attached calculator's results (older RPBE-D3 files), but
+        # fall back to the raw extxyz info/array keys the revPBE0-D3 water
+        # dataset uses instead ("TotEnergy" / "force" rather than the
+        # calculator-backed "energy" / "forces" ASE expects).
+        try:
+            energy = torch.tensor(atoms.get_potential_energy(), dtype=torch.float32)
+            forces = torch.tensor(atoms.get_forces(), dtype=torch.float32)
+        except RuntimeError:
+            energy = torch.tensor(atoms.info["TotEnergy"], dtype=torch.float32)
+            forces = torch.tensor(atoms.arrays["force"], dtype=torch.float32)
 
         system = AtomicSystem(positions=positions, species=species, cell=cell)
         samples.append(Sample(system=system, energy=energy, forces=forces))

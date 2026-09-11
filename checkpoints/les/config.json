@@ -5,7 +5,7 @@
     "local_layers": 4,
     "n_rbf": 8,
     "local_r_cut": 5.0,
-    "n_latent": 8,
+    "n_latent": 4,
     "ewald_alpha": 0.35,
     "ewald_alpha_min_ratio": 0.1,
     "ewald_kmax": 4,
