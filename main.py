@@ -44,7 +44,7 @@ LES_HYPERPARAMS = dict(
 
 FMM_HYPERPARAMS = dict(
     tree_depth=3,
-    fmm_hidden_dim=256,
+    fmm_hidden_dim=128,
     fmm_blocks=6,
     operator_depth=4,
 )
