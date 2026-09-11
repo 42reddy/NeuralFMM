@@ -43,9 +43,9 @@ LES_HYPERPARAMS = dict(
 )
 
 FMM_HYPERPARAMS = dict(
-    tree_depth=6,
-    fmm_hidden_dim=128,
-    fmm_blocks=4,
+    tree_depth=3,
+    fmm_hidden_dim=256,
+    fmm_blocks=6,
     operator_depth=4,
 )
 
@@ -98,6 +98,10 @@ def main():
         config=TRAIN_CONFIG,
     )
     trainer.fit()
+
+    best_ckpt = torch.load(trainer.checkpoint_dir / "best.pt", map_location=TRAIN_CONFIG.device)
+    model.load_state_dict(best_ckpt["model_state"])
+    print(f"loaded best checkpoint (epoch {best_ckpt['epoch']}) for evaluation")
 
     evaluator = Evaluator(model, species_map, device=TRAIN_CONFIG.device, model_class=ARCHITECTURE)
     report = evaluator.evaluate(
