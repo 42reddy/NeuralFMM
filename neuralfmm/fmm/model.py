@@ -14,28 +14,28 @@ class NeuralFMM(BaseAtomisticModel):
     """Neural FMM: a local equivariant encoder feeds a short-range energy
     head, a `les`-style analytic Coulomb branch, AND a hierarchical octree of
     learned FMM-style operators (fmm/operators.py) -- structured to mirror
-    classical FMM (and its GROMACS-style implementation) stage for stage,
+    classical FMM (and its GROMACS style implementation) stage for stage,
     with every analytically-known operator replaced by a learned one, EXCEPT
     the Coulomb kernel itself, which is now given explicitly rather than
     left for the learned operators to rediscover from data:
 
-        classical FMM        | here                          | learned?
-        ----------------------|-------------------------------|----------
+        classical FMM           | NeuralFMM                      | learned?
+        ------------------------|--------------------------------|----------
         spatial tree            | octree.build_octree            | no (geometric)
-        leaf assignment            | octree.build_octree            | no (geometric)
-        near/far classification       | octree.build_octree            | no (geometric)
-        particle representation          | atomic features h_i (encoder)  | yes
-        P2M                                 | P2O                            | yes
-        M2M                                    | O2O                            | yes
-        M2L                                       | O2I                            | yes
-        L2L                                          | I2I                            | yes
-        L2P                                             | I2P                            | yes
-        near-field                                         | LocalEnergyHead (local MLIP)   | yes
-        Green's function / Coulomb kernel                     | LatentChargeHead + smoothed    | charges: yes
-                                                                | Ewald kernel (les.kernel)      | kernel form: no
-        charge prediction                                        | LatentChargeHead (les-style)    | yes
-        energy                                                       | E_local + E_coulomb + E_LR    | yes
-        force                                                           | autodiff of energy             | n/a
+        leaf assignment         | octree.build_octree            | no (geometric)
+        near/far classification | octree.build_octree            | no (geometric)
+        particle representation | atomic features h_i (encoder)  | yes
+        P2M                     | P2O                            | yes
+        M2M                     | O2O                            | yes
+        M2L                     | O2I                            | yes
+        L2L                     | I2I                            | yes
+        L2P                     | I2P                            | yes
+        near-field              | LocalEnergyHead (local MLIP)   | yes
+        Green's function / Coulomb kernel     | LatentChargeHead + smoothed    | charges: yes
+                                | Ewald kernel (les.kernel)      | kernel form: no
+        charge prediction       | LatentChargeHead (les-style)   | yes
+        energy                  | E_local + E_coulomb + E_LR     | yes
+        force                   | autodiff of energy             | n/a
 
     INPUT (Z, r, H)
       -> EquivariantEncoder                     (LOCAL E(3)-EQUIVARIANT ENCODER)
@@ -48,12 +48,12 @@ class NeuralFMM(BaseAtomisticModel):
                                                      `les.LESModel`)
       -> smoothed_kernel_matrix / ewald_energy     E_coulomb = 0.5 sum_c q_c^T K(alpha_c) q_c
       -> build_octree(r, H)                      (BUILD OCTREE / LEAF FEATURES via P2O)
-      -> NeuralFMMTree([h_i, q_i], tree)           (IMPLICIT BRANCH -- same UPWARD/O2O ->
+      -> NeuralFMMTree(h_i, tree)                  (IMPLICIT BRANCH -- unchanged UPWARD/O2O ->
                                                      ROOT -> O2I/M2L -> accumulate incoming ->
-                                                     DOWNWARD/I2I -> LEAVES -> I2P as before,
-                                                     now charge-aware, free to learn whatever
-                                                     Coulomb-only Ewald can't -- dispersion,
-                                                     induction, correlation, many-body terms)
+                                                     DOWNWARD/I2I -> LEAVES -> I2P, free to learn
+                                                     whatever Coulomb-only Ewald can't --
+                                                     dispersion, induction, correlation,
+                                                     many-body terms)
       -> LRFieldEnergyHead                          (LR ENERGY HEAD)
       -> E = E_SR + E_coulomb + E_LR -> autodiff -> forces
 
@@ -64,6 +64,21 @@ class NeuralFMM(BaseAtomisticModel):
     hierarchical, purely-learned correction on top -- rather than asking the
     learned operators to rediscover 1/r decay from scratch, as the previous
     version did.
+
+    The two branches deliberately do NOT share the latent charges q_i as
+    input: an earlier version fed [h_i, q_i] into the tree so the implicit
+    branch could be "charge-aware", but that made q_i serve two masters --
+    the analytic Ewald kernel and the implicit tree's loss -- so gradients
+    from the tree's correction pulled q_i away from being good Coulomb
+    charges, and the model underperformed plain `les.LESModel` despite
+    having strictly more parameters. The Neural FMM paper's own translation
+    operators never mix a physically-meaningful quantity with an
+    auxiliary learned one for this reason: each `NeuralFMMTree` operator is
+    a function of one representation (`h_i`, the encoder feature) and
+    geometry alone, exactly like the paper's per-level MLP `T^tfo` acting on
+    a single vector `q_tau`. `latent_head` and `tree_module` now read the
+    same `s` independently, so each branch can optimize freely for its own
+    objective.
     """
 
     def __init__(
@@ -103,7 +118,7 @@ class NeuralFMM(BaseAtomisticModel):
         self.ewald_alpha_raw = torch.nn.Parameter(torch.full((n_latent,), 2.0))
 
         self.tree_module = NeuralFMMTree(
-            hidden_dim + n_latent, fmm_hidden_dim, tree_depth, fmm_blocks, operator_depth, fmm_n_rbf
+            hidden_dim, fmm_hidden_dim, tree_depth, fmm_blocks, operator_depth, fmm_n_rbf
         )
         self.farfield_head = LRFieldEnergyHead(fmm_hidden_dim)
 
@@ -119,7 +134,7 @@ class NeuralFMM(BaseAtomisticModel):
         kernel = smoothed_kernel_matrix(positions, cell, self._ewald_alpha(), self.ewald_kmax)
         e_coulomb = ewald_energy(latent, kernel)
 
-        h_i = torch.cat([s, latent], dim=-1)  # atomic features handed to the tree, charge-aware
+        h_i = s  # atomic features handed to the tree -- kept independent of q_i, see class docstring
 
         if tree is None:
             tree = build_octree(positions, cell, self.tree_depth)
@@ -170,7 +185,7 @@ class NeuralFMM(BaseAtomisticModel):
         kernel = smoothed_kernel_matrix_batched(positions_stacked, cell_stacked, self._ewald_alpha(), self.ewald_kmax)
         e_coulomb_total = ewald_energy_batched(latent_stacked, kernel)  # (B,)
 
-        h_i = torch.cat([s, latent], dim=-1)
+        h_i = s  # kept independent of q_i, see class docstring
 
         if tree is None:
             tree = merge_trees([build_octree(p, c, self.tree_depth) for p, c in zip(positions_list, cell_list)])
