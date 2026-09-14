@@ -7,7 +7,7 @@
     "local_r_cut": 5.0,
     "tree_depth": 3,
     "fmm_hidden_dim": 128,
-    "fmm_blocks": 6,
+    "fmm_blocks": 4,
     "operator_depth": 4,
     "num_species": 2
   },
