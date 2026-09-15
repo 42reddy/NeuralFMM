@@ -10,15 +10,17 @@ import torch
 
 from .fmm import NeuralFMM
 from .les import LESModel
+from .local.model import LocalOnlyModel
 
-MODEL_REGISTRY = {"les": LESModel, "fmm": NeuralFMM}
+MODEL_REGISTRY = {"les": LESModel, "fmm": NeuralFMM, "local": LocalOnlyModel}
 
 # per-model-class name of the per-atom auxiliary array `compute()` returns,
-# alongside "energy"/"e_local"/"e_coulomb" -- both architectures now expose
+# alongside "energy"/"e_local"/"e_coulomb" -- LES and NeuralFMM both expose
 # final latent charges (`fmm.model.NeuralFMM`'s are `q_i^0 + Delta q_i`, the
 # charge-response-corrected version of LES's own charges), so this key is
-# directly comparable across the two.
-AUX_PRED_KEY = {"les": "latent_charges", "fmm": "latent_charges"}
+# directly comparable across the two; LocalOnlyModel has no charge concept
+# at all, so it falls back to reporting `atomic_features` instead.
+AUX_PRED_KEY = {"les": "latent_charges", "fmm": "latent_charges", "local": "atomic_features"}
 
 
 def load_evaluator_from_checkpoint(checkpoint_dir, checkpoint_name="best.pt", device="cpu"):
@@ -43,7 +45,12 @@ class Evaluator:
         self.species_map = species_map
         self.device = device
         if model_class is None:
-            model_class = "fmm" if isinstance(model, NeuralFMM) else "les"
+            if isinstance(model, NeuralFMM):
+                model_class = "fmm"
+            elif isinstance(model, LocalOnlyModel):
+                model_class = "local"
+            else:
+                model_class = "les"
         self.model_class = model_class
         self.aux_pred_key = AUX_PRED_KEY[model_class]
 

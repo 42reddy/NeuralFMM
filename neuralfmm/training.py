@@ -9,6 +9,7 @@ from .dataset import list_collate
 from .fmm import NeuralFMM
 from .fmm.octree import merge_trees
 from .les import LESModel
+from .local.model import LocalOnlyModel
 
 
 class TrainConfig:
@@ -66,8 +67,12 @@ class Trainer:
             model_class = "fmm"
         elif isinstance(model, LESModel):
             model_class = "les"
+        elif isinstance(model, LocalOnlyModel):
+            model_class = "local"
         else:
-            raise TypeError(f"unrecognized model type {type(model).__name__}, expected LESModel or NeuralFMM")
+            raise TypeError(
+                f"unrecognized model type {type(model).__name__}, expected LESModel, NeuralFMM, or LocalOnlyModel"
+            )
 
         self.checkpoint_dir = Path(config.checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)

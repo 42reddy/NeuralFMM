@@ -1,12 +1,11 @@
 """Dataset prep -> model init -> training -> evaluation.
 
-Run this twice -- once with ARCHITECTURE = "fmm", once "les" -- and compare
-the two checkpoint directories' eval reports to see what NeuralFMM's
-charge-response correction (neuralfmm.fmm.NeuralFMM -- LES plus a
-whole-system-aware Delta q term, zero-initialized so it equals LES at step 0;
-see its docstring) is (or isn't) buying you over the LES baseline
-(neuralfmm.les.LESModel), both consuming the same local equivariant encoder
-and the same Ewald kernel.
+Three architectures share this script: "local" (LocalOnlyModel -- no
+long-range term at all, a sanity-check floor on the shared plumbing itself),
+"les" (LESModel), and "fmm" (NeuralFMM, LES + a charge-response correction).
+Run with each ARCHITECTURE and compare checkpoint dirs' eval reports. If
+"local" doesn't train to a sane energy/force MAE on its own, the bug is in
+the shared dataset/training/eval plumbing, not in any long-range design.
 """
 import json
 
@@ -16,6 +15,7 @@ from neuralfmm.dataset import prepare_water_dataset
 from neuralfmm.evaluation import Evaluator
 from neuralfmm.fmm import NeuralFMM
 from neuralfmm.les import LESModel
+from neuralfmm.local.model import LocalOnlyModel
 from neuralfmm.training import TrainConfig, Trainer
 
 # ----------------------------------------------------------------------
@@ -28,7 +28,7 @@ MAX_VAL_SAMPLES = None  # None = use all 50 test structures
 # ----------------------------------------------------------------------
 # Model
 # ----------------------------------------------------------------------
-ARCHITECTURE = "fmm"  # "fmm" or "les"
+ARCHITECTURE = "local"  # "local", "les", or "fmm"
 
 SHARED_HYPERPARAMS = dict(
     hidden_dim=256,
@@ -56,8 +56,10 @@ FMM_HYPERPARAMS = dict(
     response_depth=2,
 )
 
-MODEL_CLASS = {"les": LESModel, "fmm": NeuralFMM}
-ARCHITECTURE_HYPERPARAMS = {"les": LES_HYPERPARAMS, "fmm": FMM_HYPERPARAMS}
+LOCAL_HYPERPARAMS = dict(head_hidden_dim=64)
+
+MODEL_CLASS = {"local": LocalOnlyModel, "les": LESModel, "fmm": NeuralFMM}
+ARCHITECTURE_HYPERPARAMS = {"local": LOCAL_HYPERPARAMS, "les": LES_HYPERPARAMS, "fmm": FMM_HYPERPARAMS}
 
 # ----------------------------------------------------------------------
 # Training
