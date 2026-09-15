@@ -96,24 +96,6 @@ def smoothed_kernel_matrix_batched(positions, cell, alpha, kmax=6):
     return COULOMB_CONSTANT * k_total
 
 
-def ewald_potential(latent_charges, kernel_matrix):
-    """Per-atom, per-channel ambient potential phi_i^c = sum_j K_c[i,j] q_j^c
-    felt by atom i due to every other atom's channel-c charge, near and far
-    alike -- the same quantity `ewald_energy` implicitly contracts against
-    q_i (E = 0.5 sum_{i,c} q_i^c * phi_i^c), exposed here on its own so a
-    model can read it before deciding on a final charge (see
-    `fmm.model.NeuralFMM`'s charge-response step). latent_charges (N, C),
-    kernel_matrix (C, N, N) -> (N, C).
-    """
-    return torch.einsum("cnm,mc->nc", kernel_matrix, latent_charges)
-
-
-def ewald_potential_batched(latent_charges, kernel_matrix):
-    """Batched version of `ewald_potential`: latent_charges (B, N, C),
-    kernel_matrix (B, C, N, N) -> (B, N, C)."""
-    return torch.einsum("bcnm,bmc->bnc", kernel_matrix, latent_charges)
-
-
 def ewald_energy(latent_charges, kernel_matrix):
     """LES style long range energy: latent_charges (N, C) treated as C
     independent generalized "charge" channels, each summed through its OWN

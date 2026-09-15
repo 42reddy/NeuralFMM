@@ -10,17 +10,15 @@ import torch
 
 from .fmm import NeuralFMM
 from .les import LESModel
-from .local.model import LocalOnlyModel
 
-MODEL_REGISTRY = {"les": LESModel, "fmm": NeuralFMM, "local": LocalOnlyModel}
+MODEL_REGISTRY = {"les": LESModel, "fmm": NeuralFMM}
 
 # per-model-class name of the per-atom auxiliary array `compute()` returns,
-# alongside "energy"/"e_local"/"e_coulomb" -- LES and NeuralFMM both expose
-# final latent charges (`fmm.model.NeuralFMM`'s are `q_i^0 + Delta q_i`, the
-# charge-response-corrected version of LES's own charges), so this key is
-# directly comparable across the two; LocalOnlyModel has no charge concept
-# at all, so it falls back to reporting `atomic_features` instead.
-AUX_PRED_KEY = {"les": "latent_charges", "fmm": "latent_charges", "local": "atomic_features"}
+# alongside "energy"/"e_local"/"e_long_range" -- LES has no atomic-feature
+# vector to report and NeuralFMM has no latent charges (see fmm.model.NeuralFMM's
+# docstring: "Charge prediction: none required"), so each model exposes
+# exactly one of these two keys.
+AUX_PRED_KEY = {"les": "latent_charges", "fmm": "atomic_features"}
 
 
 def load_evaluator_from_checkpoint(checkpoint_dir, checkpoint_name="best.pt", device="cpu"):
@@ -45,12 +43,7 @@ class Evaluator:
         self.species_map = species_map
         self.device = device
         if model_class is None:
-            if isinstance(model, NeuralFMM):
-                model_class = "fmm"
-            elif isinstance(model, LocalOnlyModel):
-                model_class = "local"
-            else:
-                model_class = "les"
+            model_class = "fmm" if isinstance(model, NeuralFMM) else "les"
         self.model_class = model_class
         self.aux_pred_key = AUX_PRED_KEY[model_class]
 
@@ -232,9 +225,76 @@ class Evaluator:
 
         return results
 
+    def vacuum_padding_test(
+        self, sample, n_molecules=8, box_lengths=(15.0, 20.0, 30.0, 45.0, 65.0, 90.0), o_symbol="O", h_symbol="H"
+    ):
+        """Non-periodic/free-space probe built entirely from the existing
+        periodic bulk-water dataset and a trained checkpoint -- no new
+        simulation, no new labels. Carves a compact, non-periodic droplet of
+        `n_molecules` water molecules out of one bulk configuration (see
+        `cluster.extract_water_cluster`) and re-evaluates that SAME fixed
+        geometry inside cubic cells of growing `box_lengths`, i.e. growing
+        amounts of vacuum padding around one physical cluster.
+
+        The true energy of an isolated cluster does not depend on an
+        arbitrary padding choice once the box is large enough that the
+        cluster's own periodic images are irrelevant -- so any drift in the
+        reported energy across `box_lengths` is purely an artifact of how
+        an architecture's periodicity assumption behaves as it is pushed
+        toward the free-space limit neither `les.LESModel` nor
+        `fmm.NeuralFMM` was trained on. `les.LESModel`'s reciprocal-space
+        kernel sums over a k-grid tied to the box volume at a FIXED number
+        of shells (`ewald_kmax`), so inflating the box while holding kmax
+        fixed shrinks the resolvable k-range and is expected to visibly
+        drift; `fmm.NeuralFMM`'s octree only ever stores OCCUPIED boxes, so
+        the empty padding region simply contributes nothing and the
+        prediction is expected to plateau as soon as the box exceeds the
+        cluster's own extent -- this is the concrete, reusable-data
+        instantiation of that hypothesis.
+        """
+        from .cluster import extract_water_cluster, pad_into_vacuum
+
+        device = self.device
+        o_id = self.species_map[o_symbol]
+        h_id = self.species_map[h_symbol]
+
+        sys_ = sample.system.to(device)
+        cluster_pos, cluster_species = extract_water_cluster(
+            sys_.positions, sys_.species, sys_.cell, o_id, h_id, n_molecules
+        )
+
+        results = []
+        for box_length in box_lengths:
+            positions, cell = pad_into_vacuum(cluster_pos, box_length)
+            with torch.no_grad():
+                out = self.model.compute(positions, cluster_species, cell)
+            entry = {
+                "box_length": float(box_length),
+                "energy_per_molecule": out["energy"].item() / n_molecules,
+                "e_long_range_per_molecule": out["e_long_range"].item() / n_molecules,
+            }
+            if "e_coulomb" in out:
+                entry["e_coulomb_per_molecule"] = out["e_coulomb"].item() / n_molecules
+            results.append(entry)
+
+        reference = results[-1]["energy_per_molecule"]  # largest box = closest to the free-space limit
+        for entry in results:
+            entry["drift_from_largest_box"] = entry["energy_per_molecule"] - reference
+
+        return results
+
     # ---- top-level entry point ----
 
-    def evaluate(self, samples, decay_test=False, decay_max_separation=15.0, decay_steps=8):
+    def evaluate(
+        self,
+        samples,
+        decay_test=False,
+        decay_max_separation=15.0,
+        decay_steps=8,
+        vacuum_test=False,
+        vacuum_n_molecules=8,
+        vacuum_box_lengths=(15.0, 20.0, 30.0, 45.0, 65.0, 90.0),
+    ):
         pred = self.collect_predictions(samples)
 
         report = {}
@@ -246,5 +306,8 @@ class Evaluator:
 
         if decay_test:
             report["long_range_decay"] = self.long_range_decay_test(decay_max_separation, decay_steps)
+
+        if vacuum_test:
+            report["vacuum_padding"] = self.vacuum_padding_test(samples[0], vacuum_n_molecules, vacuum_box_lengths)
 
         return report

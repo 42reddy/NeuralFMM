@@ -1,11 +1,10 @@
 """Dataset prep -> model init -> training -> evaluation.
 
-Three architectures share this script: "local" (LocalOnlyModel -- no
-long-range term at all, a sanity-check floor on the shared plumbing itself),
-"les" (LESModel), and "fmm" (NeuralFMM, LES + a charge-response correction).
-Run with each ARCHITECTURE and compare checkpoint dirs' eval reports. If
-"local" doesn't train to a sane energy/force MAE on its own, the bug is in
-the shared dataset/training/eval plumbing, not in any long-range design.
+Run this twice -- once with ARCHITECTURE = "fmm", once "les" -- and compare
+the two checkpoint directories' eval reports to see what the hierarchical
+Neural FMM (neuralfmm.fmm.NeuralFMM) is (or isn't) buying you over the LES
+baseline (neuralfmm.les.LESModel), both consuming the same local equivariant
+encoder.
 """
 import json
 
@@ -15,7 +14,6 @@ from neuralfmm.dataset import prepare_water_dataset
 from neuralfmm.evaluation import Evaluator
 from neuralfmm.fmm import NeuralFMM
 from neuralfmm.les import LESModel
-from neuralfmm.local.model import LocalOnlyModel
 from neuralfmm.training import TrainConfig, Trainer
 
 # ----------------------------------------------------------------------
@@ -28,7 +26,7 @@ MAX_VAL_SAMPLES = None  # None = use all 50 test structures
 # ----------------------------------------------------------------------
 # Model
 # ----------------------------------------------------------------------
-ARCHITECTURE = "local"  # "local", "les", or "fmm"
+ARCHITECTURE = "fmm"  # "fmm" or "les"
 
 SHARED_HYPERPARAMS = dict(
     hidden_dim=256,
@@ -44,22 +42,15 @@ LES_HYPERPARAMS = dict(
     ewald_kmax=4,
 )
 
-# NeuralFMM is now LES + a zero-initialized charge-response correction (see
-# neuralfmm/fmm/model.py docstring) -- so it shares LES's Ewald hyperparameters
-# exactly, plus the response head's own size, to keep the two runs comparable.
 FMM_HYPERPARAMS = dict(
-    n_latent=4,
-    ewald_alpha=0.35,
-    ewald_alpha_min_ratio=0.1,
-    ewald_kmax=4,
-    response_hidden_dim=64,
-    response_depth=2,
+    tree_depth=3,
+    fmm_hidden_dim=128,
+    fmm_blocks=4,
+    operator_depth=4,
 )
 
-LOCAL_HYPERPARAMS = dict(head_hidden_dim=64)
-
-MODEL_CLASS = {"local": LocalOnlyModel, "les": LESModel, "fmm": NeuralFMM}
-ARCHITECTURE_HYPERPARAMS = {"local": LOCAL_HYPERPARAMS, "les": LES_HYPERPARAMS, "fmm": FMM_HYPERPARAMS}
+MODEL_CLASS = {"les": LESModel, "fmm": NeuralFMM}
+ARCHITECTURE_HYPERPARAMS = {"les": LES_HYPERPARAMS, "fmm": FMM_HYPERPARAMS}
 
 # ----------------------------------------------------------------------
 # Training
@@ -86,6 +77,15 @@ TRAIN_CONFIG = TrainConfig(
 RUN_DECAY_TEST = True
 DECAY_MAX_SEPARATION = 15.0
 DECAY_STEPS = 8
+
+# Non-periodic/free-space probe (see Evaluator.vacuum_padding_test): reuses
+# this same trained checkpoint and the bulk dataset's own test frames, no
+# new simulation -- carves a small water cluster out of one bulk frame and
+# checks whether the predicted energy drifts as that fixed cluster is
+# re-embedded in increasingly padded (more vacuum) boxes.
+RUN_VACUUM_TEST = True
+VACUUM_N_MOLECULES = 8
+VACUUM_BOX_LENGTHS = (15.0, 20.0, 30.0, 45.0, 65.0, 90.0)
 
 
 def main():
@@ -120,6 +120,9 @@ def main():
         decay_test=RUN_DECAY_TEST,
         decay_max_separation=DECAY_MAX_SEPARATION,
         decay_steps=DECAY_STEPS,
+        vacuum_test=RUN_VACUUM_TEST,
+        vacuum_n_molecules=VACUUM_N_MOLECULES,
+        vacuum_box_lengths=VACUUM_BOX_LENGTHS,
     )
 
     print("\n=== Evaluation report ===")
