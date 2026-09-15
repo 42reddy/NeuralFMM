@@ -33,17 +33,26 @@ WATER_TEST_STRIDE = 10
 # Aqueous Electrolyte Solutions", ChemPhysChem (2026), data released at
 # Zenodo (CC BY 4.0): https://doi.org/10.5281/zenodo.18108882
 NACL_DATASET_URL = "https://zenodo.org/api/records/18108882/files/Data%20sets.zip/content"
-# The raw release bundles the actual NaCl(aq) boxes (194/196 atoms: 64 H2O +
-# 1-2 ion pairs) together with a handful of 3-atom isolated-water-molecule
-# normal-mode-scan frames used for a different purpose in the source paper --
-# those aren't aqueous NaCl structures at all, so they're dropped here.
-NACL_MIN_ATOMS = 50
-# A second, independently-DFT-computed box size (442/449 atoms, same
-# composition ratio, larger cell) bundled in the release's "augmented" file.
-# Held out entirely from training -- see `prepare_nacl_size_transfer_dataset`
-# -- to test whether a model trained at the 194/196-atom box size transfers
-# to a larger box without retraining, the headline FMM-vs-LES comparison.
-NACL_LARGE_BOX_ATOM_COUNTS = {442, 449}
+# The raw release mixes THREE different structure types in the same files:
+# 3-atom isolated-water-molecule normal-mode-scan frames (unrelated to
+# aqueous NaCl), 194-atom boxes (64 H2O + 1 ion pair), and 196-atom boxes (64
+# H2O + 2 ion pairs). `compute_batched` (les/model.py, fmm/model.py) requires
+# a uniform atom count within a batch -- true of the water dataset by
+# construction (always 192 atoms) but not automatically true here -- so
+# `download_nacl_dataset` keeps only the single-ion-pair (194-atom) boxes,
+# the majority class (1500/750 of the 2250 non-monomer train frames). This
+# also keeps the comparison to LES controlled: one fixed stoichiometry
+# throughout, same as the water benchmark.
+NACL_ATOM_COUNT = 194
+# A second, independently-DFT-computed box size bundled in the release's
+# "augmented" file, held out entirely from training (see
+# `prepare_nacl_size_transfer_dataset`) to test whether a model trained at
+# NACL_ATOM_COUNT transfers to a larger box without retraining -- the
+# headline FMM-vs-LES comparison. The augmented file's larger boxes come in
+# two stoichiometries too (449 atoms = 149 H2O + 1 ion pair; 442 atoms = 146
+# H2O + 2 ion pairs) -- only 449 matches NACL_ATOM_COUNT's single-ion-pair
+# ratio, so that's the one used here.
+NACL_LARGE_BOX_ATOM_COUNT = 449
 
 
 class AtomicSystem:
@@ -205,58 +214,60 @@ def _extract_zip_member(zip_path, member, dest):
         out.write(src.read())
 
 
-def _filter_nacl_frames(raw_path, filtered_path, select_atoms=None, min_atoms=NACL_MIN_ATOMS):
-    """Drop frames that aren't aqueous-NaCl boxes at the size we want, and
-    cache the result. `select_atoms`, when given, keeps only frames with
-    exactly one of those atom counts (used to carve out just the large-box
-    structures for the size-transfer set); otherwise keeps everything with
-    at least `min_atoms` (drops the bundled isolated-water-molecule frames)."""
+def _filter_nacl_frames(raw_path, filtered_path, atom_count):
+    """Keep only frames with exactly `atom_count` atoms, and cache the
+    result. `compute_batched` (les/model.py, fmm/model.py) requires a
+    uniform atom count within a batch, so every frame handed to training or
+    evaluation must share one fixed stoichiometry -- this also drops the
+    unrelated 3-atom isolated-water-molecule normal-mode-scan frames the raw
+    release bundles in, since those never match `atom_count` either."""
     import ase.io
 
     if filtered_path.exists():
         return
     frames = ase.io.read(str(raw_path), index=":")
-    if select_atoms is not None:
-        frames = [atoms for atoms in frames if len(atoms) in select_atoms]
-    else:
-        frames = [atoms for atoms in frames if len(atoms) >= min_atoms]
+    frames = [atoms for atoms in frames if len(atoms) == atom_count]
     ase.io.write(str(filtered_path), frames, format="extxyz")
 
 
 def download_nacl_dataset(data_dir="data"):
-    """Fetch the aqueous-NaCl revPBE0-D3 benchmark (194/196 atoms/frame) into
-    `data_dir`, returning (train_path, test_path) -- mirrors
-    `download_water_dataset`, except the upstream release already ships a
-    train/test split (`NaCl_train.xyz`/`NaCl_test.xyz`), so there's no
-    splitting to do here, only extraction from the zip and frame filtering."""
+    """Fetch the aqueous-NaCl revPBE0-D3 benchmark (fixed at NACL_ATOM_COUNT
+    atoms/frame -- one ion pair -- for uniform batching, see
+    `_filter_nacl_frames`) into `data_dir`, returning (train_path,
+    test_path) -- mirrors `download_water_dataset`, except the upstream
+    release already ships a train/test split (`NaCl_train.xyz`/
+    `NaCl_test.xyz`), so there's no splitting to do here, only extraction
+    from the zip and frame filtering."""
     data_dir = Path(data_dir)
     zip_path = ensure_downloaded(NACL_DATASET_URL, data_dir / "nacl_hetzel_stein.zip")
 
-    train_path = data_dir / "train-NaCl_revPBE0-D3.xyz"
-    test_path = data_dir / "test-NaCl_revPBE0-D3.xyz"
+    train_path = data_dir / "train-NaCl_1ionpair_revPBE0-D3.xyz"
+    test_path = data_dir / "test-NaCl_1ionpair_revPBE0-D3.xyz"
     if not train_path.exists():
         raw_train = data_dir / "_raw_NaCl_train.xyz"
         _extract_zip_member(zip_path, "Data sets/NaCl_train.xyz", raw_train)
-        _filter_nacl_frames(raw_train, train_path)
+        _filter_nacl_frames(raw_train, train_path, NACL_ATOM_COUNT)
     if not test_path.exists():
         raw_test = data_dir / "_raw_NaCl_test.xyz"
         _extract_zip_member(zip_path, "Data sets/NaCl_test.xyz", raw_test)
-        _filter_nacl_frames(raw_test, test_path)
+        _filter_nacl_frames(raw_test, test_path, NACL_ATOM_COUNT)
     return train_path, test_path
 
 
 def download_nacl_size_transfer_dataset(data_dir="data"):
-    """Fetch the large-box (442/449 atoms/frame) aqueous-NaCl structures from
-    the same release's augmented file, returning a single path. These are
-    never part of `download_nacl_dataset`'s train/test split -- they exist
-    only to evaluate a model trained at the 194/196-atom box size on a
-    larger, independently-DFT-computed box it has never seen."""
+    """Fetch the large-box (NACL_LARGE_BOX_ATOM_COUNT atoms/frame -- same
+    one-ion-pair stoichiometry as `download_nacl_dataset`, just a bigger box)
+    aqueous-NaCl structures from the same release's augmented file,
+    returning a single path. These are never part of
+    `download_nacl_dataset`'s train/test split -- they exist only to
+    evaluate a model trained at NACL_ATOM_COUNT on a larger,
+    independently-DFT-computed box it has never seen."""
     data_dir = Path(data_dir)
     zip_path = ensure_downloaded(NACL_DATASET_URL, data_dir / "nacl_hetzel_stein.zip")
 
-    large_path = data_dir / "size_transfer-NaCl_revPBE0-D3.xyz"
+    large_path = data_dir / "size_transfer-NaCl_1ionpair_revPBE0-D3.xyz"
     if not large_path.exists():
         raw_aug = data_dir / "_raw_NaCl_train_aug.xyz"
         _extract_zip_member(zip_path, "Data sets/NaCl_train_aug.xyz", raw_aug)
-        _filter_nacl_frames(raw_aug, large_path, select_atoms=NACL_LARGE_BOX_ATOM_COUNTS)
+        _filter_nacl_frames(raw_aug, large_path, NACL_LARGE_BOX_ATOM_COUNT)
     return large_path
