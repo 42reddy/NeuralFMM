@@ -37,7 +37,7 @@ MAX_VAL_SAMPLES = None  # None = use all test structures
 # ----------------------------------------------------------------------
 # Model
 # ----------------------------------------------------------------------
-ARCHITECTURE = "les"  # "fmm" or "les"
+ARCHITECTURE = "fmm"  # "fmm" or "les"
 
 SHARED_HYPERPARAMS = dict(
     hidden_dim=256,
