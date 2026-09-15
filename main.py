@@ -59,7 +59,7 @@ CHECKPOINT_DIR = f"checkpoints/{ARCHITECTURE}"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 TRAIN_CONFIG = TrainConfig(
-    epochs=40,
+    epochs=10,
     batch_size=4,
     lr=1e-3,
     energy_weight=1.0,
