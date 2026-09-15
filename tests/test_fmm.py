@@ -31,7 +31,7 @@ def test_forward_shapes():
     out = model.compute(positions, species, cell)
     assert out["energy"].shape == ()
     assert out["atomic_features"].shape == (positions.shape[0], model.local.hidden_dim)
-    assert out["latent_charges"].shape == (positions.shape[0], model.n_latent)
+    assert out["farfield_features"].shape == (positions.shape[0], model.tree_module.blocks[0].hidden_dim)
 
 
 def test_forces_match_finite_differences():
@@ -40,7 +40,7 @@ def test_forces_match_finite_differences():
         positions, species, cell = _make_system(n_atoms=6, seed=1)
         model = _make_model().double()
         with torch.no_grad():
-            for p in model.farfield_head.parameters():
+            for p in model.energy_head.parameters():
                 p.add_(0.05 * torch.randn_like(p))
 
         out = model.energy_and_forces(positions, species, cell)
@@ -73,12 +73,14 @@ def test_translation_and_periodic_invariance():
     assert abs(e0 - e_lattice) < 1e-4
 
 
-def test_farfield_head_zero_init_is_noop():
-    """LRFieldEnergyHead is zero-initialized (see fmm/heads.py), so the
-    long-range pathway starts as an exact no-op regardless of what the tree
-    computes -- unlike LES's fixed analytic Ewald kernel, which contributes
-    from the very first forward pass (see test_les.py)."""
+def test_coupled_head_zero_init_matches_species_baseline():
+    """CoupledEnergyHead's MLP is zero-initialized (see fmm/heads.py), so at
+    init the model's energy is exactly the sum of per-species e0 baselines,
+    regardless of what the local encoder or the tree compute -- unlike LES's
+    fixed analytic Ewald kernel, which contributes from the very first
+    forward pass (see test_les.py)."""
     positions, species, cell = _make_system()
     model = _make_model()
     out = model.compute(positions, species, cell)
-    assert out["e_long_range"].item() == 0.0
+    expected = model.energy_head.e0(species).sum().item()
+    assert abs(out["energy"].item() - expected) < 1e-6
