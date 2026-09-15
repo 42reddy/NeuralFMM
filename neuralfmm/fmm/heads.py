@@ -2,39 +2,42 @@ import torch
 import torch.nn as nn
 
 
-class CoupledEnergyHead(nn.Module):
-    """The joint "LOCAL + LR ENERGY HEAD": a single MLP reading
-    [h_i, z_i^LR] -- the local encoder feature concatenated with the tree's
-    per-atom long-range output -- down to one energy contribution per atom.
+def _mlp(in_dim, out_dim, hidden_dim, depth=2):
+    layers = []
+    d = in_dim
+    for _ in range(depth - 1):
+        layers += [nn.Linear(d, hidden_dim), nn.SiLU()]
+        d = hidden_dim
+    layers += [nn.Linear(d, out_dim)]
+    return nn.Sequential(*layers)
 
-    This replaces the previous design of two independent heads,
-    e_i = LocalEnergyHead(h_i) + LRFieldEnergyHead(z_i^LR), summed. That
-    additive shape can only ever express a short-range term plus a
-    long-range term that never interact -- which is also exactly the shape
-    of `les.LESModel` (E = f(h_i) + 0.5 q^T K q), so it could never
-    demonstrate anything a fixed physical kernel couldn't already do. Here
-    the far-field context is concatenated *into* the same MLP that predicts
-    the local energy, so it can modulate the local prediction nonlinearly
-    (gate it, rescale it, whatever the data needs) instead of only adding to
-    it -- the one thing a pairwise Ewald-style long-range term structurally
+
+class ChargeResponseHead(nn.Module):
+    """Predicts a correction Delta q_i to atom i's initial latent charge,
+    from atom i's own local feature AND phi_i -- the ambient Coulomb
+    potential atom i feels from every other atom's *initial* charge, near
+    and far alike (see `les.kernel.ewald_potential`). This is the model's
+    one piece of genuine whole-system awareness: `les.LESModel`'s charges
+    are a function of local environment only, by construction, and can
+    never respond to anything outside the encoder's cutoff; phi_i is a
+    single scalar (per channel) that already sums the effect of the entire
+    system, so Delta q_i = f(h_i, phi_i) lets an atom's charge depend on
+    the field the rest of the system puts it in -- the same physical idea
+    behind charge-equilibration / polarizable force fields, and the thing
+    fixed-charge or one-shot latent-charge electrostatics structurally
     cannot do.
 
-    Zero-initialized on the z_i^LR half of the input weight so the model
-    starts out exactly at the species-baseline + local-only prediction, and
-    only learns to lean on far-field context where doing so helps.
+    Zero-initialized so Delta q_i = 0 at the start of training: with no
+    correction, this architecture is byte-for-byte `les.LESModel`'s
+    long-range term, so any improvement over LES is attributable to the
+    response mechanism, not to a different starting point.
     """
 
-    def __init__(self, num_species, local_dim, farfield_dim, hidden_dim=64):
+    def __init__(self, feat_dim, n_latent, hidden_dim=64, depth=2):
         super().__init__()
-        self.e0 = nn.Embedding(num_species, 1)
-        self.mlp = nn.Sequential(
-            nn.Linear(local_dim + farfield_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, 1),
-        )
+        self.mlp = _mlp(feat_dim + n_latent, n_latent, hidden_dim, depth)
         nn.init.zeros_(self.mlp[-1].weight)
         nn.init.zeros_(self.mlp[-1].bias)
 
-    def forward(self, species, local_feat, farfield_feat):
-        combined = torch.cat([local_feat, farfield_feat], dim=-1)
-        return self.e0(species).squeeze(-1) + self.mlp(combined).squeeze(-1)
+    def forward(self, feat, potential):
+        return self.mlp(torch.cat([feat, potential], dim=-1))

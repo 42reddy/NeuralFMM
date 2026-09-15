@@ -14,11 +14,11 @@ from .les import LESModel
 MODEL_REGISTRY = {"les": LESModel, "fmm": NeuralFMM}
 
 # per-model-class name of the per-atom auxiliary array `compute()` returns,
-# alongside "energy"/"e_local"/"e_long_range" -- LES has no atomic-feature
-# vector to report and NeuralFMM has no latent charges (see fmm.model.NeuralFMM's
-# docstring: "Charge prediction: none required"), so each model exposes
-# exactly one of these two keys.
-AUX_PRED_KEY = {"les": "latent_charges", "fmm": "atomic_features"}
+# alongside "energy"/"e_local"/"e_coulomb" -- both architectures now expose
+# final latent charges (`fmm.model.NeuralFMM`'s are `q_i^0 + Delta q_i`, the
+# charge-response-corrected version of LES's own charges), so this key is
+# directly comparable across the two.
+AUX_PRED_KEY = {"les": "latent_charges", "fmm": "latent_charges"}
 
 
 def load_evaluator_from_checkpoint(checkpoint_dir, checkpoint_name="best.pt", device="cpu"):

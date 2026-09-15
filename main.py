@@ -1,10 +1,12 @@
 """Dataset prep -> model init -> training -> evaluation.
 
 Run this twice -- once with ARCHITECTURE = "fmm", once "les" -- and compare
-the two checkpoint directories' eval reports to see what the hierarchical
-Neural FMM (neuralfmm.fmm.NeuralFMM) is (or isn't) buying you over the LES
-baseline (neuralfmm.les.LESModel), both consuming the same local equivariant
-encoder.
+the two checkpoint directories' eval reports to see what NeuralFMM's
+charge-response correction (neuralfmm.fmm.NeuralFMM -- LES plus a
+whole-system-aware Delta q term, zero-initialized so it equals LES at step 0;
+see its docstring) is (or isn't) buying you over the LES baseline
+(neuralfmm.les.LESModel), both consuming the same local equivariant encoder
+and the same Ewald kernel.
 """
 import json
 
@@ -42,11 +44,16 @@ LES_HYPERPARAMS = dict(
     ewald_kmax=4,
 )
 
+# NeuralFMM is now LES + a zero-initialized charge-response correction (see
+# neuralfmm/fmm/model.py docstring) -- so it shares LES's Ewald hyperparameters
+# exactly, plus the response head's own size, to keep the two runs comparable.
 FMM_HYPERPARAMS = dict(
-    tree_depth=3,
-    fmm_hidden_dim=128,
-    fmm_blocks=4,
-    operator_depth=4,
+    n_latent=4,
+    ewald_alpha=0.35,
+    ewald_alpha_min_ratio=0.1,
+    ewald_kmax=4,
+    response_hidden_dim=64,
+    response_depth=2,
 )
 
 MODEL_CLASS = {"les": LESModel, "fmm": NeuralFMM}
