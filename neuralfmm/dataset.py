@@ -1,7 +1,12 @@
 import torch
 from torch.utils.data import Dataset
 
-from .data import NACL_VACUUM_BOX, AtomicSystem, download_nacl_dataset, download_water_dataset
+from .data import (
+    AtomicSystem,
+    download_nacl_dataset,
+    download_nacl_size_transfer_dataset,
+    download_water_dataset,
+)
 
 
 class Sample:
@@ -34,21 +39,11 @@ def build_species_map(symbols):
     return {s: i for i, s in enumerate(unique)}
 
 
-def load_extxyz(path, species_map=None, max_samples=None, vacuum_box_length=None):
+def load_extxyz(path, species_map=None, max_samples=None):
     """Load an extxyz trajectory (ASE-readable) with per-frame `energy` and
     per-atom `forces` into a list of Samples. If `species_map` is None, one
     is built from every symbol seen in the file (pass the training set's map
-    explicitly when loading a val/test file so indices line up).
-
-    `vacuum_box_length`: if given, each frame's own cell is DISCARDED and
-    replaced with a cubic box of this side length, re-centering that frame's
-    atoms inside it (see `cluster.pad_into_vacuum`) -- for a dataset of
-    genuinely non-periodic, finite structures (e.g. the NaCl ionic clusters,
-    see `data.download_nacl_dataset`) whose own per-frame "Lattice" entry is
-    an arbitrary, often too-small artifact rather than a real simulation
-    cell. Leave as None for an already-periodic dataset (e.g. bulk water),
-    where the file's own cell is exactly what should be used.
-    """
+    explicitly when loading a val/test file so indices line up)."""
     import ase.io
 
     frames = ase.io.read(str(path), index=":")
@@ -59,9 +54,6 @@ def load_extxyz(path, species_map=None, max_samples=None, vacuum_box_length=None
         all_symbols = [s for atoms in frames for s in atoms.get_chemical_symbols()]
         species_map = build_species_map(all_symbols)
 
-    if vacuum_box_length is not None:
-        from .cluster import pad_into_vacuum
-
     samples = []
     for atoms in frames:
         symbols = atoms.get_chemical_symbols()
@@ -69,18 +61,20 @@ def load_extxyz(path, species_map=None, max_samples=None, vacuum_box_length=None
         positions = torch.tensor(atoms.get_positions(), dtype=torch.float32)
         cell = torch.tensor(atoms.cell.array, dtype=torch.float32)
         # Prefer an attached calculator's results (older RPBE-D3 files), but
-        # fall back to the raw extxyz info/array keys the revPBE0-D3 water
-        # dataset uses instead ("TotEnergy" / "force" rather than the
-        # calculator-backed "energy" / "forces" ASE expects).
+        # fall back to the raw extxyz info/array keys each dataset actually
+        # uses instead of the calculator-backed "energy" / "forces" ASE
+        # expects: "TotEnergy" / "force" for the revPBE0-D3 water dataset,
+        # "REF_energy" / "REF_forces" for the NaCl(aq) dataset.
         try:
             energy = torch.tensor(atoms.get_potential_energy(), dtype=torch.float32)
             forces = torch.tensor(atoms.get_forces(), dtype=torch.float32)
         except RuntimeError:
-            energy = torch.tensor(atoms.info["TotEnergy"], dtype=torch.float32)
-            forces = torch.tensor(atoms.arrays["force"], dtype=torch.float32)
-
-        if vacuum_box_length is not None:
-            positions, cell = pad_into_vacuum(positions, vacuum_box_length)
+            if "TotEnergy" in atoms.info:
+                energy = torch.tensor(atoms.info["TotEnergy"], dtype=torch.float32)
+                forces = torch.tensor(atoms.arrays["force"], dtype=torch.float32)
+            else:
+                energy = torch.tensor(atoms.info["REF_energy"], dtype=torch.float32)
+                forces = torch.tensor(atoms.arrays["REF_forces"], dtype=torch.float32)
 
         system = AtomicSystem(positions=positions, species=species, cell=cell)
         samples.append(Sample(system=system, energy=energy, forces=forces))
@@ -119,19 +113,25 @@ def prepare_water_dataset(data_dir="data", max_train_samples=None, max_val_sampl
 
 
 def prepare_nacl_dataset(data_dir="data", max_train_samples=None, max_val_samples=None):
-    """End-to-end counterpart to `prepare_water_dataset` for the NaCl
-    ionic-cluster benchmark (see `data.download_nacl_dataset`): a dataset of
-    genuinely non-periodic, finite, and sometimes net-charged structures,
-    chosen specifically to stress long-range electrostatics in a way bulk
-    water's fast dielectric screening does not (see `data.py`'s comment
-    above `NACL_DATASET_URL`)."""
+    """End-to-end: download the bundled aqueous-NaCl revPBE0-D3 benchmark (if
+    not already cached in `data_dir`), parse it, and return ready-to-train
+    torch Datasets plus the species map used to build them -- mirrors
+    `prepare_water_dataset`, for the long-range-electrostatics-heavy
+    benchmark (see `data.NACL_DATASET_URL`)."""
     train_path, test_path = download_nacl_dataset(data_dir)
 
-    train_samples, species_map = load_extxyz(
-        train_path, max_samples=max_train_samples, vacuum_box_length=NACL_VACUUM_BOX
-    )
-    val_samples, _ = load_extxyz(
-        test_path, species_map=species_map, max_samples=max_val_samples, vacuum_box_length=NACL_VACUUM_BOX
-    )
+    train_samples, species_map = load_extxyz(train_path, max_samples=max_train_samples)
+    val_samples, _ = load_extxyz(test_path, species_map=species_map, max_samples=max_val_samples)
 
     return AtomicDataset(train_samples), AtomicDataset(val_samples), species_map
+
+
+def prepare_nacl_size_transfer_dataset(species_map, data_dir="data", max_samples=None):
+    """Large-box (442/449-atom) aqueous-NaCl structures from the same
+    release, held out entirely from `prepare_nacl_dataset`'s train/test
+    split. Pass in the `species_map` a model was already trained with (from
+    `prepare_nacl_dataset`) so indices line up -- this is meant purely as an
+    evaluation set for the size-transfer comparison, never for training."""
+    large_path = download_nacl_size_transfer_dataset(data_dir)
+    samples, _ = load_extxyz(large_path, species_map=species_map, max_samples=max_samples)
+    return AtomicDataset(samples)

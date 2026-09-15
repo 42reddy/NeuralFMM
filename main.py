@@ -5,20 +5,12 @@ the two checkpoint directories' eval reports to see what the hierarchical
 Neural FMM (neuralfmm.fmm.NeuralFMM) is (or isn't) buying you over the LES
 baseline (neuralfmm.les.LESModel), both consuming the same local equivariant
 encoder.
-
-Also try DATASET = "nacl" instead of "water": bulk water's electrostatics
-are dipolar and fast-screening, so a trained LES/FMM checkpoint can end up
-barely using its long-range channel at all (see the vacuum-padding results
-in checkpoints/les/eval_report.json). The NaCl ionic-cluster dataset is
-genuinely non-periodic, finite, and sometimes net-charged, which stresses
-unscreened long-range Coulomb in a way bulk water does not -- see
-`neuralfmm.data`'s comment above `NACL_DATASET_URL`.
 """
 import json
 
 import torch
 
-from neuralfmm.dataset import prepare_nacl_dataset, prepare_water_dataset
+from neuralfmm.dataset import prepare_water_dataset
 from neuralfmm.evaluation import Evaluator
 from neuralfmm.fmm import NeuralFMM
 from neuralfmm.les import LESModel
@@ -27,12 +19,9 @@ from neuralfmm.training import TrainConfig, Trainer
 # ----------------------------------------------------------------------
 # Data
 # ----------------------------------------------------------------------
-DATASET = "nacl"  # "water" or "nacl"
-DATASET_PREPARE_FN = {"water": prepare_water_dataset, "nacl": prepare_nacl_dataset}
-
 DATA_DIR = "data"
-MAX_TRAIN_SAMPLES = None  # None = use all available training structures
-MAX_VAL_SAMPLES = None  # None = use all available test structures
+MAX_TRAIN_SAMPLES = None  # None = use all 604 training structures
+MAX_VAL_SAMPLES = None  # None = use all 50 test structures
 
 # ----------------------------------------------------------------------
 # Model
@@ -66,12 +55,12 @@ ARCHITECTURE_HYPERPARAMS = {"les": LES_HYPERPARAMS, "fmm": FMM_HYPERPARAMS}
 # ----------------------------------------------------------------------
 # Training
 # ----------------------------------------------------------------------
-CHECKPOINT_DIR = f"checkpoints/{DATASET}-{ARCHITECTURE}"
+CHECKPOINT_DIR = f"checkpoints/{ARCHITECTURE}"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 TRAIN_CONFIG = TrainConfig(
-    epochs=200,
-    batch_size=64,
+    epochs=10,
+    batch_size=4,
     lr=1e-3,
     energy_weight=1.0,
     force_weight=100.0,
@@ -93,18 +82,14 @@ DECAY_STEPS = 8
 # this same trained checkpoint and the bulk dataset's own test frames, no
 # new simulation -- carves a small water cluster out of one bulk frame and
 # checks whether the predicted energy drifts as that fixed cluster is
-# re-embedded in increasingly padded (more vacuum) boxes. Only meaningful
-# for the water dataset (`cluster.extract_water_cluster` assumes O/H
-# molecules) -- the NaCl dataset's structures are already non-periodic
-# finite clusters, so this test doesn't apply to it.
-RUN_VACUUM_TEST = DATASET == "water"
+# re-embedded in increasingly padded (more vacuum) boxes.
+RUN_VACUUM_TEST = True
 VACUUM_N_MOLECULES = 8
 VACUUM_BOX_LENGTHS = (15.0, 20.0, 30.0, 45.0, 65.0, 90.0)
 
 
 def main():
-    train_dataset, val_dataset, species_map = DATASET_PREPARE_FN[DATASET](DATA_DIR, MAX_TRAIN_SAMPLES, MAX_VAL_SAMPLES)
-    print(f"dataset: {DATASET}")
+    train_dataset, val_dataset, species_map = prepare_water_dataset(DATA_DIR, MAX_TRAIN_SAMPLES, MAX_VAL_SAMPLES)
     print(f"species map: {species_map}")
     print(f"train: {len(train_dataset)} structures, val: {len(val_dataset)} structures")
     print(f"device: {TRAIN_CONFIG.device}")
