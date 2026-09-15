@@ -29,8 +29,8 @@ MAX_VAL_SAMPLES = None  # None = use all 50 test structures
 ARCHITECTURE = "fmm"  # "fmm" or "les"
 
 SHARED_HYPERPARAMS = dict(
-    hidden_dim=64,
-    local_layers=2,
+    hidden_dim=256,
+    local_layers=4,
     n_rbf=8,
     local_r_cut=5.0,
 )
@@ -44,7 +44,7 @@ LES_HYPERPARAMS = dict(
 
 FMM_HYPERPARAMS = dict(
     tree_depth=3,
-    fmm_hidden_dim=32,
+    fmm_hidden_dim=128,
     fmm_blocks=4,
     operator_depth=4,
 )
