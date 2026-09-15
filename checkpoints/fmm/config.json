@@ -1,12 +1,12 @@
 {
   "model_class": "fmm",
   "model_config": {
-    "hidden_dim": 256,
-    "local_layers": 4,
+    "hidden_dim": 64,
+    "local_layers": 2,
     "n_rbf": 8,
     "local_r_cut": 5.0,
     "tree_depth": 3,
-    "fmm_hidden_dim": 128,
+    "fmm_hidden_dim": 32,
     "fmm_blocks": 4,
     "operator_depth": 4,
     "num_species": 2

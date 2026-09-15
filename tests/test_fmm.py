@@ -1,6 +1,7 @@
 import torch
 
 from neuralfmm import NeuralFMM
+from neuralfmm.fmm.heads import CoupledEnergyHead
 
 
 def _make_system(n_atoms=8, num_species=2, seed=0, box=9.0):
@@ -40,7 +41,7 @@ def test_forces_match_finite_differences():
         positions, species, cell = _make_system(n_atoms=6, seed=1)
         model = _make_model().double()
         with torch.no_grad():
-            for p in model.farfield_head.parameters():
+            for p in model.energy_head.parameters():
                 p.add_(0.05 * torch.randn_like(p))
 
         out = model.energy_and_forces(positions, species, cell)
@@ -73,12 +74,26 @@ def test_translation_and_periodic_invariance():
     assert abs(e0 - e_lattice) < 1e-4
 
 
-def test_farfield_head_zero_init_is_noop():
-    """LRFieldEnergyHead is zero-initialized (see fmm/heads.py), so the
-    long-range pathway starts as an exact no-op regardless of what the tree
-    computes -- unlike LES's fixed analytic Ewald kernel, which contributes
-    from the very first forward pass (see test_les.py)."""
-    positions, species, cell = _make_system()
-    model = _make_model()
-    out = model.compute(positions, species, cell)
-    assert out["e_long_range"].item() == 0.0
+def test_coupled_head_starts_local_only():
+    """CoupledEnergyHead (fmm/heads.py) zero-inits only the far-field
+    columns of its first layer's weight, so at init the predicted per-atom
+    energy must be identical no matter what the tree's far-field feature is
+    -- that pathway starts as an exact no-op -- while the local pathway
+    starts at an ordinary, immediately-useful init rather than being zeroed
+    out too."""
+    torch.manual_seed(0)
+    num_species, local_dim, farfield_dim = 3, 8, 8
+    head = CoupledEnergyHead(num_species, local_dim, farfield_dim, hidden_dim=16)
+
+    species = torch.tensor([0, 1, 2, 1])
+    local_feat = torch.randn(4, local_dim)
+    farfield_a = torch.randn(4, farfield_dim)
+    farfield_b = torch.randn(4, farfield_dim) * 10.0
+
+    e_a = head(species, local_feat, farfield_a)
+    e_b = head(species, local_feat, farfield_b)
+    assert torch.allclose(e_a, e_b)
+
+    other_local = torch.randn(4, local_dim)
+    e_c = head(species, other_local, farfield_a)
+    assert not torch.allclose(e_a, e_c)

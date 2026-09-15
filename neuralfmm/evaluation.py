@@ -14,10 +14,8 @@ from .les import LESModel
 MODEL_REGISTRY = {"les": LESModel, "fmm": NeuralFMM}
 
 # per-model-class name of the per-atom auxiliary array `compute()` returns,
-# alongside "energy"/"e_local"/"e_long_range" -- LES has no atomic-feature
-# vector to report and NeuralFMM has no latent charges (see fmm.model.NeuralFMM's
-# docstring: "Charge prediction: none required"), so each model exposes
-# exactly one of these two keys.
+# alongside "energy"/"e_local"/"e_coulomb" -- LES has no atomic-feature
+# vector to report, so it's reported by its latent charges instead.
 AUX_PRED_KEY = {"les": "latent_charges", "fmm": "atomic_features"}
 
 
@@ -250,7 +248,11 @@ class Evaluator:
         the empty padding region simply contributes nothing and the
         prediction is expected to plateau as soon as the box exceeds the
         cluster's own extent -- this is the concrete, reusable-data
-        instantiation of that hypothesis.
+        instantiation of that hypothesis. Both architectures also expose
+        `e_coulomb`, the explicit analytic Ewald term shared by both (see
+        `fmm.model.NeuralFMM`'s docstring) -- the single most
+        periodicity-sensitive piece of either model, and the fairest
+        like-for-like slice to compare.
         """
         from .cluster import extract_water_cluster, pad_into_vacuum
 
@@ -271,10 +273,11 @@ class Evaluator:
             entry = {
                 "box_length": float(box_length),
                 "energy_per_molecule": out["energy"].item() / n_molecules,
-                "e_long_range_per_molecule": out["e_long_range"].item() / n_molecules,
             }
             if "e_coulomb" in out:
                 entry["e_coulomb_per_molecule"] = out["e_coulomb"].item() / n_molecules
+            if "e_long_range" in out:
+                entry["e_long_range_per_molecule"] = out["e_long_range"].item() / n_molecules
             results.append(entry)
 
         reference = results[-1]["energy_per_molecule"]  # largest box = closest to the free-space limit
