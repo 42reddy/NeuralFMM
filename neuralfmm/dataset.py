@@ -1,7 +1,7 @@
 import torch
 from torch.utils.data import Dataset
 
-from .data import AtomicSystem, download_water_dataset
+from .data import NACL_VACUUM_BOX, AtomicSystem, download_nacl_dataset, download_water_dataset
 
 
 class Sample:
@@ -34,11 +34,21 @@ def build_species_map(symbols):
     return {s: i for i, s in enumerate(unique)}
 
 
-def load_extxyz(path, species_map=None, max_samples=None):
+def load_extxyz(path, species_map=None, max_samples=None, vacuum_box_length=None):
     """Load an extxyz trajectory (ASE-readable) with per-frame `energy` and
     per-atom `forces` into a list of Samples. If `species_map` is None, one
     is built from every symbol seen in the file (pass the training set's map
-    explicitly when loading a val/test file so indices line up)."""
+    explicitly when loading a val/test file so indices line up).
+
+    `vacuum_box_length`: if given, each frame's own cell is DISCARDED and
+    replaced with a cubic box of this side length, re-centering that frame's
+    atoms inside it (see `cluster.pad_into_vacuum`) -- for a dataset of
+    genuinely non-periodic, finite structures (e.g. the NaCl ionic clusters,
+    see `data.download_nacl_dataset`) whose own per-frame "Lattice" entry is
+    an arbitrary, often too-small artifact rather than a real simulation
+    cell. Leave as None for an already-periodic dataset (e.g. bulk water),
+    where the file's own cell is exactly what should be used.
+    """
     import ase.io
 
     frames = ase.io.read(str(path), index=":")
@@ -48,6 +58,9 @@ def load_extxyz(path, species_map=None, max_samples=None):
     if species_map is None:
         all_symbols = [s for atoms in frames for s in atoms.get_chemical_symbols()]
         species_map = build_species_map(all_symbols)
+
+    if vacuum_box_length is not None:
+        from .cluster import pad_into_vacuum
 
     samples = []
     for atoms in frames:
@@ -65,6 +78,9 @@ def load_extxyz(path, species_map=None, max_samples=None):
         except RuntimeError:
             energy = torch.tensor(atoms.info["TotEnergy"], dtype=torch.float32)
             forces = torch.tensor(atoms.arrays["force"], dtype=torch.float32)
+
+        if vacuum_box_length is not None:
+            positions, cell = pad_into_vacuum(positions, vacuum_box_length)
 
         system = AtomicSystem(positions=positions, species=species, cell=cell)
         samples.append(Sample(system=system, energy=energy, forces=forces))
@@ -98,5 +114,24 @@ def prepare_water_dataset(data_dir="data", max_train_samples=None, max_val_sampl
 
     train_samples, species_map = load_extxyz(train_path, max_samples=max_train_samples)
     val_samples, _ = load_extxyz(test_path, species_map=species_map, max_samples=max_val_samples)
+
+    return AtomicDataset(train_samples), AtomicDataset(val_samples), species_map
+
+
+def prepare_nacl_dataset(data_dir="data", max_train_samples=None, max_val_samples=None):
+    """End-to-end counterpart to `prepare_water_dataset` for the NaCl
+    ionic-cluster benchmark (see `data.download_nacl_dataset`): a dataset of
+    genuinely non-periodic, finite, and sometimes net-charged structures,
+    chosen specifically to stress long-range electrostatics in a way bulk
+    water's fast dielectric screening does not (see `data.py`'s comment
+    above `NACL_DATASET_URL`)."""
+    train_path, test_path = download_nacl_dataset(data_dir)
+
+    train_samples, species_map = load_extxyz(
+        train_path, max_samples=max_train_samples, vacuum_box_length=NACL_VACUUM_BOX
+    )
+    val_samples, _ = load_extxyz(
+        test_path, species_map=species_map, max_samples=max_val_samples, vacuum_box_length=NACL_VACUUM_BOX
+    )
 
     return AtomicDataset(train_samples), AtomicDataset(val_samples), species_map

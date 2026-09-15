@@ -143,10 +143,11 @@ def ensure_downloaded(url, dest):
     return dest
 
 
-def _split_water_dataset(raw_path, train_path, test_path, test_stride=WATER_TEST_STRIDE):
-    """Split the single upstream trajectory file into cached train/test
-    extxyz files, taking every `test_stride`-th frame as test. Skipped if
-    both outputs already exist."""
+def _split_dataset(raw_path, train_path, test_path, test_stride):
+    """Split a single upstream trajectory file into cached train/test extxyz
+    files, taking every `test_stride`-th frame (in file order) as test.
+    Skipped if both outputs already exist. Generic over what's actually in
+    the file -- used for both the bulk-water and NaCl-cluster datasets."""
     import ase.io
 
     if train_path.exists() and test_path.exists():
@@ -168,5 +169,71 @@ def download_water_dataset(data_dir="data"):
     raw_path = ensure_downloaded(WATER_DATASET_URL, data_dir / "dataset_1593.xyz")
     train_path = data_dir / "train-H2O_revPBE0-D3.xyz"
     test_path = data_dir / "test-H2O_revPBE0-D3.xyz"
-    _split_water_dataset(raw_path, train_path, test_path)
+    _split_dataset(raw_path, train_path, test_path, WATER_TEST_STRIDE)
+    return train_path, test_path
+
+
+# Small (16-17 atom) NaCl ionic clusters, non-periodic, 5000 configurations
+# split exactly 50/50 between net-neutral Na8Cl8 (16 atoms) and deliberately
+# net-CHARGED Na9Cl8 (17 atoms, a +1 cluster). Source: the fit-4hdnnp-NaCl/
+# folder of https://github.com/BingqingCheng/cace-lr-fit (companion code/
+# data to Cheng, "Latent Ewald summation for machine learning of long-range
+# interactions," arXiv:2408.15165 -- the same LES this codebase's
+# `les.LESModel` is modeled on), itself following the NaCl dataset from the
+# 4th-generation HDNNP paper (Ko et al., Nat. Commun. 12, 398 (2021)).
+#
+# Unlike bulk water -- a neutral, dipolar liquid whose orientational
+# disorder screens electrostatic correlations fast, which is why a trained
+# `les.LESModel` on it can end up barely using its long-range channel at all
+# (see the vacuum-padding results earlier) -- these are genuinely
+# non-periodic, finite ionic clusters with real, unscreened 1/r Coulomb
+# tails across the whole cluster. `download_nacl_dataset` is the
+# data-genuinely-needs-long-range counterpart to `download_water_dataset`.
+NACL_DATASET_URL = "https://raw.githubusercontent.com/BingqingCheng/cace-lr-fit/main/fit-4hdnnp-NaCl/NaCl.xyz"
+# Both `les.LESModel.compute_batched` and `fmm.NeuralFMM.compute_batched`
+# require every structure in a training batch to have the SAME atom count
+# (true for bulk water, where every frame is 64 molecules), so the raw
+# file's mix of 16- and 17-atom frames can't be used as-is. Keeping only the
+# 16-atom, net-NEUTRAL Na8Cl8 half (rather than the 17-atom, net-charged
+# half) trades away the "no periodic image to screen a net charge against"
+# angle, but keeps the more standard, still-genuinely-long-range case and
+# needs no change to the batching machinery. Supporting mixed cluster sizes
+# (e.g. bucketing batches by atom count) is a real option if the net-charged
+# half turns out to matter -- not done here to keep this change minimal.
+NACL_N_ATOMS = 16
+# Comfortably larger than any cluster's extent (~20 A max span) in every
+# direction -- see `load_extxyz`'s `vacuum_box_length` and
+# `cluster.pad_into_vacuum`: the file's own per-frame "Lattice" is an
+# arbitrary, too-small artifact of how each cluster was cut out (pbc="F F F"
+# throughout), not a real simulation cell, so it's discarded and replaced
+# with this instead.
+NACL_VACUUM_BOX = 60.0
+NACL_TEST_STRIDE = 10
+
+
+def _filter_by_atom_count(raw_path, filtered_path, n_atoms):
+    """Keep only frames with exactly `n_atoms` atoms, caching the result at
+    `filtered_path` (skipped if it already exists) -- see the comment above
+    `NACL_N_ATOMS` for why this filtering is needed."""
+    import ase.io
+
+    if filtered_path.exists():
+        return
+    frames = ase.io.read(str(raw_path), index=":")
+    kept = [atoms for atoms in frames if len(atoms) == n_atoms]
+    ase.io.write(str(filtered_path), kept, format="extxyz")
+
+
+def download_nacl_dataset(data_dir="data"):
+    """Fetch the bundled NaCl ionic-cluster benchmark into `data_dir`,
+    returning (train_path, test_path). Same caching behavior as
+    `download_water_dataset`, plus the one-time uniform-atom-count filter
+    (see `NACL_N_ATOMS`)."""
+    data_dir = Path(data_dir)
+    raw_path = ensure_downloaded(NACL_DATASET_URL, data_dir / "NaCl.xyz")
+    filtered_path = data_dir / f"NaCl-{NACL_N_ATOMS}atom.xyz"
+    _filter_by_atom_count(raw_path, filtered_path, NACL_N_ATOMS)
+    train_path = data_dir / "train-NaCl.xyz"
+    test_path = data_dir / "test-NaCl.xyz"
+    _split_dataset(filtered_path, train_path, test_path, NACL_TEST_STRIDE)
     return train_path, test_path
