@@ -33,25 +33,8 @@ WATER_TEST_STRIDE = 10
 # Aqueous Electrolyte Solutions", ChemPhysChem (2026), data released at
 # Zenodo (CC BY 4.0): https://doi.org/10.5281/zenodo.18108882
 NACL_DATASET_URL = "https://zenodo.org/api/records/18108882/files/Data%20sets.zip/content"
-# The raw release mixes THREE different structure types in the same files:
-# 3-atom isolated-water-molecule normal-mode-scan frames (unrelated to
-# aqueous NaCl), 194-atom boxes (64 H2O + 1 ion pair), and 196-atom boxes (64
-# H2O + 2 ion pairs). `compute_batched` (les/model.py, fmm/model.py) requires
-# a uniform atom count within a batch -- true of the water dataset by
-# construction (always 192 atoms) but not automatically true here -- so
-# `download_nacl_dataset` keeps only the single-ion-pair (194-atom) boxes,
-# the majority class (1500/750 of the 2250 non-monomer train frames). This
-# also keeps the comparison to LES controlled: one fixed stoichiometry
-# throughout, same as the water benchmark.
+
 NACL_ATOM_COUNT = 194
-# A second, independently-DFT-computed box size bundled in the release's
-# "augmented" file, held out entirely from training (see
-# `prepare_nacl_size_transfer_dataset`) to test whether a model trained at
-# NACL_ATOM_COUNT transfers to a larger box without retraining -- the
-# headline FMM-vs-LES comparison. The augmented file's larger boxes come in
-# two stoichiometries too (449 atoms = 149 H2O + 1 ion pair; 442 atoms = 146
-# H2O + 2 ion pairs) -- only 449 matches NACL_ATOM_COUNT's single-ion-pair
-# ratio, so that's the one used here.
 NACL_LARGE_BOX_ATOM_COUNT = 449
 
 
@@ -69,7 +52,7 @@ class AtomicSystem:
         self.positions = positions
         self.species = species
         self.cell = cell
-        self._octree_cache = {}  # depth -> Octree, plus (depth, device) -> Octree
+        self._octree_cache = {}  # depth -> Octree (CPU topology only, see get_octree)
         self._neighbor_cache = {}  # cutoff -> (edge_index, shifts), plus (cutoff, device) -> (edge_index, shifts)
         self._device_cache = {}  # device -> AtomicSystem (this system's tensors already moved there)
 
@@ -103,35 +86,37 @@ class AtomicSystem:
     def get_octree(self, depth, device=None):
         """Octree topology (occupied boxes, parent/child + near/far
         neighbor rows) depends only on `positions`/`cell`, which never
-        change across training epochs for a fixed sample -- so build it
-        once (on CPU, cheaply) and cache it, then cache a per-device copy
-        too, instead of rebuilding it from scratch on every forward pass
-        (build_octree syncs the GPU, drops to numpy, and does per-box
-        Python loops -- expensive to repeat every epoch)."""
+        change across training epochs for a fixed sample, so build it
+        once (on CPU, cheaply) and cache it (build_octree syncs the GPU,
+        drops to numpy, and does per box Python loops, expensive to
+        repeat every epoch), instead of rebuilding it from scratch on every
+        forward pass.
+
+        `move_tree_to` is cheap (no numpy rebuild, just a handful of
+        small tensor transfers), so it's called fresh on every request
+        instead: the expensive CPU-side build stays cached, only the cheap
+        H2D transfer repeats, and GPU memory stays bounded by the current
+        batch rather than the whole dataset."""
         if depth not in self._octree_cache:
             self._octree_cache[depth] = build_octree(self.positions, self.cell, depth)
         tree = self._octree_cache[depth]
 
         if device is None:
             return tree
-        device = torch.device(device)
-        device_key = (depth, device)
-        if device_key not in self._octree_cache:
-            self._octree_cache[device_key] = move_tree_to(tree, device)
-        return self._octree_cache[device_key]
+        return move_tree_to(tree, torch.device(device))
 
     def get_neighbor_graph(self, cutoff, device=None):
-        """Neighbor-list *topology* (which atom pairs are within `cutoff`,
+        """Neighbor list *topology* (which atom pairs are within `cutoff`,
         and by which periodic image) depends only on `positions`/`cell`,
         fixed across epochs for a training sample -- same reasoning as
         `get_octree`. Cached here as (edge_index, shifts); the caller
         recomputes the actual (differentiable) r_ij vectors from these each
         forward pass via `local.neighbors.edge_vectors`, so forces still
-        flow correctly through positions -- only the discrete "who's a
+        flow correctly through positions, only the discrete "who's a
         neighbor" decision is treated as fixed.
 
         `periodic_neighbor_list` determines this via boolean-mask indexing,
-        which forces a GPU synchronize to learn the survivor count -- caching
+        which forces a GPU synchronize to learn the survivor count, caching
         it avoids paying that sync on every single forward pass/epoch.
         """
         if cutoff not in self._neighbor_cache:
@@ -204,10 +189,7 @@ def download_water_dataset(data_dir="data"):
 
 
 def _extract_zip_member(zip_path, member, dest):
-    """Pull a single member out of `zip_path` into `dest`, skipped if `dest`
-    is already there. The Zenodo release bundles several unrelated datasets
-    (HfO2, MAPbI3, ...) in one archive, so callers only ever ask for the one
-    member (`Data sets/NaCl_*.xyz`) they actually need."""
+
     if dest.exists() and dest.stat().st_size > 0:
         return
     with zipfile.ZipFile(zip_path) as z, z.open(member) as src, open(dest, "wb") as out:
@@ -215,12 +197,7 @@ def _extract_zip_member(zip_path, member, dest):
 
 
 def _filter_nacl_frames(raw_path, filtered_path, atom_count):
-    """Keep only frames with exactly `atom_count` atoms, and cache the
-    result. `compute_batched` (les/model.py, fmm/model.py) requires a
-    uniform atom count within a batch, so every frame handed to training or
-    evaluation must share one fixed stoichiometry -- this also drops the
-    unrelated 3-atom isolated-water-molecule normal-mode-scan frames the raw
-    release bundles in, since those never match `atom_count` either."""
+
     import ase.io
 
     if filtered_path.exists():
@@ -231,13 +208,7 @@ def _filter_nacl_frames(raw_path, filtered_path, atom_count):
 
 
 def download_nacl_dataset(data_dir="data"):
-    """Fetch the aqueous-NaCl revPBE0-D3 benchmark (fixed at NACL_ATOM_COUNT
-    atoms/frame -- one ion pair -- for uniform batching, see
-    `_filter_nacl_frames`) into `data_dir`, returning (train_path,
-    test_path) -- mirrors `download_water_dataset`, except the upstream
-    release already ships a train/test split (`NaCl_train.xyz`/
-    `NaCl_test.xyz`), so there's no splitting to do here, only extraction
-    from the zip and frame filtering."""
+
     data_dir = Path(data_dir)
     zip_path = ensure_downloaded(NACL_DATASET_URL, data_dir / "nacl_hetzel_stein.zip")
 
@@ -255,13 +226,7 @@ def download_nacl_dataset(data_dir="data"):
 
 
 def download_nacl_size_transfer_dataset(data_dir="data"):
-    """Fetch the large-box (NACL_LARGE_BOX_ATOM_COUNT atoms/frame -- same
-    one-ion-pair stoichiometry as `download_nacl_dataset`, just a bigger box)
-    aqueous-NaCl structures from the same release's augmented file,
-    returning a single path. These are never part of
-    `download_nacl_dataset`'s train/test split -- they exist only to
-    evaluate a model trained at NACL_ATOM_COUNT on a larger,
-    independently-DFT-computed box it has never seen."""
+
     data_dir = Path(data_dir)
     zip_path = ensure_downloaded(NACL_DATASET_URL, data_dir / "nacl_hetzel_stein.zip")
 
