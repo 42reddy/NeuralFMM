@@ -1,0 +1,20 @@
+{
+  "model_class": "fmm",
+  "model_config": {
+    "hidden_dim": 128,
+    "local_layers": 2,
+    "n_rbf": 8,
+    "local_r_cut": 5.0,
+    "tree_depth": 3,
+    "fmm_hidden_dim": 128,
+    "fmm_blocks": 2,
+    "operator_depth": 2,
+    "num_species": 4
+  },
+  "species_map": {
+    "H": 0,
+    "O": 1,
+    "Na": 2,
+    "Cl": 3
+  }
+}
