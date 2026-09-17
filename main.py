@@ -40,7 +40,7 @@ MAX_VAL_SAMPLES = None  # None = use all test structures
 ARCHITECTURE = "fmm"  # "fmm" or "les"
 
 SHARED_HYPERPARAMS = dict(
-    hidden_dim=256,
+    hidden_dim=128,
     local_layers=4,
     n_rbf=8,
     local_r_cut=5.0,
