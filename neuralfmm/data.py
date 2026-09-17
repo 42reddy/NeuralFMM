@@ -52,7 +52,7 @@ class AtomicSystem:
         self.positions = positions
         self.species = species
         self.cell = cell
-        self._octree_cache = {}  # depth -> Octree (CPU topology only, see get_octree)
+        self._octree_cache = {}  # depth -> Octree, plus (depth, device) -> Octree
         self._neighbor_cache = {}  # cutoff -> (edge_index, shifts), plus (cutoff, device) -> (edge_index, shifts)
         self._device_cache = {}  # device -> AtomicSystem (this system's tensors already moved there)
 
@@ -86,37 +86,35 @@ class AtomicSystem:
     def get_octree(self, depth, device=None):
         """Octree topology (occupied boxes, parent/child + near/far
         neighbor rows) depends only on `positions`/`cell`, which never
-        change across training epochs for a fixed sample, so build it
-        once (on CPU, cheaply) and cache it (build_octree syncs the GPU,
-        drops to numpy, and does per box Python loops, expensive to
-        repeat every epoch), instead of rebuilding it from scratch on every
-        forward pass.
-
-        `move_tree_to` is cheap (no numpy rebuild, just a handful of
-        small tensor transfers), so it's called fresh on every request
-        instead: the expensive CPU-side build stays cached, only the cheap
-        H2D transfer repeats, and GPU memory stays bounded by the current
-        batch rather than the whole dataset."""
+        change across training epochs for a fixed sample -- so build it
+        once (on CPU, cheaply) and cache it, then cache a per-device copy
+        too, instead of rebuilding it from scratch on every forward pass
+        (build_octree syncs the GPU, drops to numpy, and does per-box
+        Python loops -- expensive to repeat every epoch)."""
         if depth not in self._octree_cache:
             self._octree_cache[depth] = build_octree(self.positions, self.cell, depth)
         tree = self._octree_cache[depth]
 
         if device is None:
             return tree
-        return move_tree_to(tree, torch.device(device))
+        device = torch.device(device)
+        device_key = (depth, device)
+        if device_key not in self._octree_cache:
+            self._octree_cache[device_key] = move_tree_to(tree, device)
+        return self._octree_cache[device_key]
 
     def get_neighbor_graph(self, cutoff, device=None):
-        """Neighbor list *topology* (which atom pairs are within `cutoff`,
+        """Neighbor-list *topology* (which atom pairs are within `cutoff`,
         and by which periodic image) depends only on `positions`/`cell`,
         fixed across epochs for a training sample -- same reasoning as
         `get_octree`. Cached here as (edge_index, shifts); the caller
         recomputes the actual (differentiable) r_ij vectors from these each
         forward pass via `local.neighbors.edge_vectors`, so forces still
-        flow correctly through positions, only the discrete "who's a
+        flow correctly through positions -- only the discrete "who's a
         neighbor" decision is treated as fixed.
 
         `periodic_neighbor_list` determines this via boolean-mask indexing,
-        which forces a GPU synchronize to learn the survivor count, caching
+        which forces a GPU synchronize to learn the survivor count -- caching
         it avoids paying that sync on every single forward pass/epoch.
         """
         if cutoff not in self._neighbor_cache:
@@ -160,9 +158,7 @@ def ensure_downloaded(url, dest):
 
 
 def _split_water_dataset(raw_path, train_path, test_path, test_stride=WATER_TEST_STRIDE):
-    """Split the single upstream trajectory file into cached train/test
-    extxyz files, taking every `test_stride`-th frame as test. Skipped if
-    both outputs already exist."""
+    
     import ase.io
 
     if train_path.exists() and test_path.exists():
@@ -176,10 +172,7 @@ def _split_water_dataset(raw_path, train_path, test_path, test_stride=WATER_TEST
 
 
 def download_water_dataset(data_dir="data"):
-    """Fetch the bundled bulk-water revPBE0-D3 benchmark into `data_dir`,
-    returning (train_path, test_path). Safe to call every run -- it only
-    hits the network the first time, and the train/test split is cached
-    alongside the raw download so it's only computed once too."""
+
     data_dir = Path(data_dir)
     raw_path = ensure_downloaded(WATER_DATASET_URL, data_dir / "dataset_1593.xyz")
     train_path = data_dir / "train-H2O_revPBE0-D3.xyz"

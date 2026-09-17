@@ -54,10 +54,10 @@ LES_HYPERPARAMS = dict(
 )
 
 FMM_HYPERPARAMS = dict(
-    tree_depth=3,
+    tree_depth=2,
     fmm_hidden_dim=128,
-    fmm_blocks=2,
-    operator_depth=2,
+    fmm_blocks=4,
+    operator_depth=4,
 )
 
 MODEL_CLASS = {"les": LESModel, "fmm": NeuralFMM}
@@ -71,7 +71,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 TRAIN_CONFIG = TrainConfig(
     epochs=10,
-    batch_size=4,
+    batch_size=2,
     lr=1e-3,
     energy_weight=1.0,
     force_weight=100.0,
