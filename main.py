@@ -18,7 +18,7 @@ import json
 
 import torch
 
-from neuralfmm.dataset import prepare_nacl_dataset, prepare_water_dataset
+from neuralfmm.dataset import prepare_nacl_dataset, prepare_nacl_size_transfer_dataset, prepare_water_dataset
 from neuralfmm.evaluation import Evaluator
 from neuralfmm.fmm import NeuralFMM
 from neuralfmm.les import LESModel
@@ -37,7 +37,7 @@ MAX_VAL_SAMPLES = None  # None = use all test structures
 # ----------------------------------------------------------------------
 # Model
 # ----------------------------------------------------------------------
-ARCHITECTURE = "fmm"  # "fmm" or "les"
+ARCHITECTURE = "les"  # "fmm" or "les"
 
 SHARED_HYPERPARAMS = dict(
     hidden_dim=128,
@@ -70,8 +70,8 @@ CHECKPOINT_DIR = f"checkpoints/{DATASET}/{ARCHITECTURE}"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 TRAIN_CONFIG = TrainConfig(
-    epochs=10,
-    batch_size=2,
+    epochs=60,
+    batch_size=4,
     lr=1e-3,
     energy_weight=1.0,
     force_weight=100.0,
@@ -98,6 +98,20 @@ DECAY_STEPS = 8
 RUN_VACUUM_TEST = DATASET == "water"
 VACUUM_N_MOLECULES = 8
 VACUUM_BOX_LENGTHS = (15.0, 20.0, 30.0, 45.0, 65.0, 90.0)
+
+# Experiment 1 -- the headline FMM-vs-LES size/density-transfer comparison
+# (see Evaluator.size_transfer_test / density_scan_test): train at one fixed
+# box size/density and check how much a checkpoint's accuracy degrades on
+# structures it never trained on. `les.LESModel`'s reciprocal-space kernel is
+# tied to a fixed k-shell count at the training box's volume, so it's
+# expected to drift more; `fmm.NeuralFMM`'s octree re-partitions space at
+# whatever size/density it's handed, so it's expected to be more stable.
+# `prepare_nacl_size_transfer_dataset` only exists for the NaCl(aq) release,
+# so the real-labels half only runs there; the synthetic density scan needs
+# no extra data and runs for either dataset.
+RUN_SIZE_TRANSFER_TEST = DATASET == "nacl"
+RUN_DENSITY_SCAN_TEST = True
+DENSITY_SCALE_FACTORS = (0.90, 0.95, 1.0, 1.05, 1.1, 1.2)
 
 
 def main():
@@ -127,6 +141,13 @@ def main():
     model.load_state_dict(best_ckpt["model_state"])
     print(f"loaded best checkpoint (epoch {best_ckpt['epoch']}) for evaluation")
 
+    size_transfer_samples = None
+    if RUN_SIZE_TRANSFER_TEST:
+        size_transfer_dataset = prepare_nacl_size_transfer_dataset(species_map, DATA_DIR)
+        size_transfer_samples = size_transfer_dataset.samples
+        print(f"size-transfer set: {len(size_transfer_samples)} structures "
+              f"({size_transfer_samples[0].system.num_atoms()} atoms/frame)")
+
     evaluator = Evaluator(model, species_map, device=TRAIN_CONFIG.device, model_class=ARCHITECTURE)
     report = evaluator.evaluate(
         val_dataset.samples,
@@ -136,6 +157,9 @@ def main():
         vacuum_test=RUN_VACUUM_TEST,
         vacuum_n_molecules=VACUUM_N_MOLECULES,
         vacuum_box_lengths=VACUUM_BOX_LENGTHS,
+        size_transfer_samples=size_transfer_samples,
+        density_scan=RUN_DENSITY_SCAN_TEST,
+        density_scale_factors=DENSITY_SCALE_FACTORS,
     )
 
     print("\n=== Evaluation report ===")

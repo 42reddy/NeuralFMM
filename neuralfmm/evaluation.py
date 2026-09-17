@@ -286,6 +286,67 @@ class Evaluator:
 
         return results
 
+    def size_transfer_test(self, samples_large):
+        """Evaluate this checkpoint -- trained at one fixed box size/density
+        (e.g. NACL_ATOM_COUNT=194 atoms, see data.py) -- on an independently
+        DFT-computed LARGER box of the same stoichiometry/density it never
+        trained on (e.g. dataset.prepare_nacl_size_transfer_dataset's
+        449-atom set). Real DFT labels exist at this size (unlike
+        `density_scan_test` below), so this reports actual accuracy there,
+        directly comparable to the in-distribution val report from
+        `evaluate()` -- the headline comparison this project is built
+        around: `les.LESModel`'s reciprocal-space kernel sums over a k-grid
+        tied to the box volume at a FIXED number of shells (`ewald_kmax`),
+        so a bigger box at training-time resolution is expected to degrade
+        its long-range term; `fmm.NeuralFMM`'s octree re-partitions space
+        into occupied boxes at whatever size it's given, so it's expected to
+        transfer with much less drift. Whether that's actually true is an
+        empirical question this method answers, not an assumption it bakes
+        in."""
+        pred = self.collect_predictions(samples_large)
+        report = {}
+        report.update(self.energy_metrics(pred))
+        report.update(self.force_metrics(pred))
+        report.update(self.energy_ranking_metrics(pred))
+        return report
+
+    def density_scan_test(self, sample, scale_factors=(0.90, 0.95, 1.0, 1.05, 1.1, 1.2)):
+        """Synthetic isotropic compression/expansion probe: ONE real
+        structure's positions and cell are both scaled by the same factor
+        (an isotropic dilation preserves fractional coordinates exactly, so
+        this is a clean density change with no other structural change),
+        and re-evaluated with no retraining. No DFT reference exists at
+        these synthetic densities, so -- like `vacuum_padding_test` -- this
+        reports *drift* relative to the structure's own real density
+        (scale=1.0) rather than accuracy against ground truth. Same
+        hypothesis as `size_transfer_test`, complementary axis: does the
+        long-range term react sensibly to a density it never trained on, or
+        does whichever fixed-resolution assumption it carries (LES's
+        k-space grid; FMM's hard box-boundary partition) show up as drift?
+        """
+        device = self.device
+        sys_ = sample.system.to(device)
+        n_atoms = sys_.num_atoms()
+
+        results = []
+        for scale in scale_factors:
+            positions = sys_.positions * scale
+            cell = sys_.cell * scale
+            with torch.no_grad():
+                out = self.model.compute(positions, sys_.species, cell)
+            entry = {"scale": float(scale), "energy_per_atom": out["energy"].item() / n_atoms}
+            if "e_coulomb" in out:
+                entry["e_coulomb_per_atom"] = out["e_coulomb"].item() / n_atoms
+            if "e_long_range" in out:
+                entry["e_long_range_per_atom"] = out["e_long_range"].item() / n_atoms
+            results.append(entry)
+
+        reference = next((e["energy_per_atom"] for e in results if e["scale"] == 1.0), results[0]["energy_per_atom"])
+        for entry in results:
+            entry["drift_from_scale_1"] = entry["energy_per_atom"] - reference
+
+        return results
+
     # ---- top-level entry point ----
 
     def evaluate(
@@ -297,6 +358,9 @@ class Evaluator:
         vacuum_test=False,
         vacuum_n_molecules=8,
         vacuum_box_lengths=(15.0, 20.0, 30.0, 45.0, 65.0, 90.0),
+        size_transfer_samples=None,
+        density_scan=False,
+        density_scale_factors=(0.90, 0.95, 1.0, 1.05, 1.1, 1.2),
     ):
         pred = self.collect_predictions(samples)
 
@@ -312,5 +376,11 @@ class Evaluator:
 
         if vacuum_test:
             report["vacuum_padding"] = self.vacuum_padding_test(samples[0], vacuum_n_molecules, vacuum_box_lengths)
+
+        if size_transfer_samples is not None:
+            report["size_transfer"] = self.size_transfer_test(size_transfer_samples)
+
+        if density_scan:
+            report["density_scan"] = self.density_scan_test(samples[0], density_scale_factors)
 
         return report
